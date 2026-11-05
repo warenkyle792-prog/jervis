@@ -1,0 +1,12 @@
+# Optional: AI chat via OpenAI (needs OPENAI_API_KEY)
+openai>=1.40.0
+
+# Optional: offline text-to-speech in the terminal / CLI
+pyttsx3>=2.90
+
+# Optional: server-side microphone input
+SpeechRecognition>=3.10.0
+
+# pyaudio is required by SpeechRecognition on macOS (brew install portaudio first)
+# and on some Linux setups. Uncomment when you have the system audio headers:
+# pyaudio>=0.2.14

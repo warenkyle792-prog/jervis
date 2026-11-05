@@ -1,0 +1,5 @@
+# Jervis core needs NO third-party packages: Python 3.10+ standard library only.
+# The web UI, to-do list, notes, reminders and system tasks all work out of the box.
+#
+# Optional extras live in requirements-optional.txt (AI chat, terminal voice).
+# Test-only dependencies live in requirements-dev.txt.

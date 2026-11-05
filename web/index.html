@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jervis — your local task assistant</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">J</div>
+          <div>
+            <h1>Jervis</h1>
+            <p>Local task assistant</p>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="Jervis sections">
+          <button class="nav-item active" id="navCommand">Command Center</button>
+          <button class="nav-item" id="navTasks">To-do list</button>
+          <button class="nav-item" data-command="notes">Memory</button>
+          <button class="nav-item" data-command="help">Help</button>
+        </nav>
+
+        <section class="panel">
+          <div class="panel-title">Runtime</div>
+          <div class="metric-row"><span>Server</span><strong id="serverStatus">Connecting</strong></div>
+          <div class="metric-row"><span>Voice</span><strong id="voiceStatus">Checking</strong></div>
+          <div class="metric-row"><span>AI Chat</span><strong id="aiStatus">Checking</strong></div>
+        </section>
+
+        <section class="panel task-panel">
+          <div class="panel-title">My Tasks <span class="task-count" id="taskCount">0 open</span></div>
+          <form class="task-add" id="taskForm">
+            <input id="taskInput" type="text" autocomplete="off" placeholder="Add a task…" />
+            <button type="submit" aria-label="Add task">+</button>
+          </form>
+          <ul class="task-list" id="taskList"></ul>
+          <button class="task-clear" id="clearCompleted">Clear completed</button>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">Quick Actions</div>
+          <div class="quick-list">
+            <button class="quick-command" data-command="what can you do">What can you do</button>
+            <button class="quick-command" data-command="tasks">My tasks</button>
+            <button class="quick-command" data-command="time">Time</button>
+            <button class="quick-command" data-command="notes">Notes</button>
+            <button class="quick-command" data-command="reminders">Reminders</button>
+            <button class="quick-command" data-command="files">Workspace files</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">Runs on your computer · no account needed</div>
+            <h2>Tell Jervis what to do. It keeps your tasks, notes and reminders.</h2>
+          </div>
+          <div class="top-actions">
+            <button class="secondary-button" id="clearButton">Clear chat</button>
+            <button class="secondary-button" id="muteButton">Sound On</button>
+          </div>
+        </header>
+
+        <section class="overview-grid">
+          <article class="stat-card"><span>Mode</span><strong>Voice + Text</strong></article>
+          <article class="stat-card"><span>Scope</span><strong>Local System</strong></article>
+          <article class="stat-card"><span>Memory</span><strong>SQLite</strong></article>
+        </section>
+
+        <section class="voice-stage">
+          <canvas id="waveform" width="900" height="260" aria-hidden="true"></canvas>
+          <div class="voice-center">
+            <button class="mic-button" id="micButton" aria-label="Start listening">
+              <span class="mic-ring"></span>
+              <span class="mic-core"></span>
+            </button>
+            <div class="voice-copy">
+              <div class="listen-state" id="listenState">Ready</div>
+              <div class="hint" id="voiceHint">Press the mic to speak, or type a command below. Try “add task call the bank”.</div>
+            </div>
+          </div>
+        </section>
+
+        <form class="command-bar" id="commandForm">
+          <input id="commandInput" type="text" autocomplete="off" placeholder="Try: add task call the bank, tasks, time, or help" />
+          <button type="submit">Run</button>
+        </form>
+
+        <section class="conversation-wrap">
+          <div class="conversation-header">
+            <div>
+              <div class="eyebrow">Conversation</div>
+              <h3>Assistant Log</h3>
+            </div>
+            <span id="turnCount">1 message</span>
+          </div>
+          <div class="conversation" id="conversation" aria-live="polite">
+            <article class="message assistant">
+              <div class="message-meta">Jervis</div>
+              <p>Online. I can run tasks for you. Type <strong>help</strong>, try a quick action, or just tell me what you need.</p>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
