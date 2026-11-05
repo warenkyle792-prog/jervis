@@ -124,8 +124,17 @@ python3 -m jarvis.web       # then open http://127.0.0.1:8765
 ## Live preview in this workspace
 
 `site/index.html` is a small download page with both installers and the setup
-steps; it's served on port 8000 so you can click straight through to the
-installers from the preview.
+steps. Resume the preview on port 8000 with:
+
+```bash
+./start-preview.sh          # macOS / Linux
+start-preview.bat           # Windows
+```
+
+Both bind `0.0.0.0:8000` (required for the Arena preview proxy) and serve `site/`.
+It's a static page — no build step and no dependencies. To preview the
+interactive browser assistant instead, run `python3 -m jarvis.web` from
+`web-assistant/` (default port 8765; set `JERVIS_PORT=8000` to use the same port).
 
 ---
 
