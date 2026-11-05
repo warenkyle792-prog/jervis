@@ -133,7 +133,9 @@ start-preview.bat           # Windows
 
 Both bind `0.0.0.0:8000` (required for the Arena preview proxy) and serve `site/`.
 `start-preview.sh` also clears any stale listener left on port 8000 before it
-binds, so it is safe to run again after a session resume.
+binds, so it is safe to run again after a session resume. Check it with
+`./check-preview.sh` or `curl http://127.0.0.1:8000/health.json` (returns a JSON
+status blob).
 It's a static page — no build step and no dependencies. To preview the
 interactive browser assistant instead, run `python3 -m jarvis.web` from
 `web-assistant/` (default port 8765; set `JERVIS_PORT=8000` to use the same port).

@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "app": "Jervis preview",
+  "port": 8000,
+  "page": "/index.html",
+  "installer_release": "v1.0.5",
+  "source": "jervis-app-source/"
+}
