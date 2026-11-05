@@ -1,159 +1,126 @@
-# Jervis — a local assistant that runs tasks for you
+# Jervis — the desktop voice assistant
 
-Jervis is a small assistant you run on your own computer. You talk to it in a web
-page (or the terminal, or by voice), and it **does things**: keeps a to-do list,
-saves notes and reminders, tells you the time, lists your files, searches the web,
-and opens apps or folders. Everything is stored in a SQLite file on your machine —
-no account, no cloud, and no API key needed for the core features.
+This is the **other Jervis**: the installable desktop app that actually does
+things on your computer. Say **"Hey Jervis"**, then ask for music, videos, shows,
+timers or documents — or have it use your mouse and keyboard for you. Its AI runs
+**on your own computer**: no account, no API key, no cloud.
 
-```
-┌──────────────────────────────────────────────┐
-│  Browser / terminal / microphone              │
-│        ↓  "add task call the bank"            │
-│  Jervis command router  →  SQLite memory      │
-│        →  tasks · notes · reminders · system │
-└──────────────────────────────────────────────┘
-```
+> The product was called **Jervis** through version 1.0.5 (the installer files
+> still say Jervis); newer builds are branded *Jarvis*. Same app, same repo.
 
-> **Where this came from:** the starting point is the open-source
-> [Adib-07/Jervis](https://github.com/Adib-07/Jervis) project (MIT licence, see
-> `LICENSE` and `UPSTREAM_README.md`). It was adapted here to work on Windows,
-> macOS and Linux, to add a real to-do list with a clickable web panel, browser
-> voice input/output, and a friendlier offline chat fallback. I couldn't find a
-> link in your message, so this is the closest match to "Jervis that runs tasks
-> for people and is interactive". Notes about the other projects I found are at
-> the bottom of this file.
+Upstream: <https://github.com/TheJarvis-App/jarvis-app> ·
+Official page: <https://arielzaha.github.io/jervis/> ·
+Latest release: **v1.0.5** (25 Sep 2026).
 
 ---
 
-## Run it on your own computer
+## 1. Download the installer
 
-You need **Python 3.10 or newer**. That's it — the core uses only the Python
-standard library, so there is nothing to install.
-
-```bash
-git clone https://github.com/warenkyle792-prog/jervis.git
-cd jervis
-python3 -m jarvis.web          # macOS / Linux
-py -m jarvis.web               # Windows (or: python -m jarvis.web)
-```
-
-It prints `Jervis is running at http://127.0.0.1:8765` and normally opens your
-browser automatically. If it doesn't, open <http://127.0.0.1:8765> yourself.
-Press `Ctrl+C` in the terminal to stop it.
-
-Shortcuts are included if you prefer double-clicking:
-
-- **Windows:** `start.bat`
-- **macOS / Linux:** `./start.sh`
-
-Prefer a terminal instead of a web page?
-
-```bash
-python3 -m jarvis --text      # type commands, type `exit` to quit
-python3 -m jarvis             # voice mode (falls back to typing without a mic)
-```
-
-Your data lives in `.jarvis_data/memory.sqlite3` (ignored by Git). Delete that
-file to start fresh.
-
----
-
-## What you can say
-
-| Say this | What Jervis does |
-|---|---|
-| `add task call the bank` | Adds a task to your to-do list |
-| `tasks` / `my tasks` | Shows the list with IDs |
-| `complete 1` | Ticks task #1 off (say it again to reopen) |
-| `delete task 1` | Removes task #1 |
-| `clear completed` | Cleans up finished tasks |
-| `remember the wifi code is 1234` | Saves a note |
-| `notes` / `forget 1` | Lists / deletes notes |
-| `remind me to call home at 18:30` | Saves a reminder |
-| `reminders` / `done 1` | Lists / completes reminders |
-| `time`, `date` | Current date and time |
-| `status` | OS, machine, Python and disk info |
-| `files` | Lists files in the folder Jervis was started in |
-| `battery` | Battery level where the OS reports one |
-| `apps`, `open app notepad`, `open folder ~/Downloads` | Apps and folders on your computer |
-| `search web for weather in Nairobi` | Gives you a clickable search link |
-| `help`, `capabilities`, `what can you do` | The full command list |
-| `chat <anything>` | Free-form answer (needs an AI provider, see below) |
-
-In the web UI you can also click checkboxes in **My Tasks**, use the **Quick
-Actions** buttons, press the mic to speak (Chrome/Edge browser speech), and hear
-replies read out loud. Typed commands work everywhere even without a microphone.
-
----
-
-## Optional extras
-
-**AI chat** (for open-ended questions instead of commands). Either:
-
-```bash
-# Option A: OpenAI
-pip install -r requirements-optional.txt
-set OPENAI_API_KEY=sk-...          # Windows:  set OPENAI_API_KEY=sk-...
-python3 -m jarvis.web
-
-# Option B: free, local Ollama
-ollama pull llama3.2
-ollama serve                      # leave running in another terminal
-python3 -m jarvis.web
-```
-
-Without either, Jervis says it's offline and suggests a real command instead —
-all task, note, reminder and system features still work.
-
-**Terminal voice / offline speech:** `pip install -r requirements-optional.txt`
-gives you `pyttsx3` and `SpeechRecognition`. On macOS, `brew install portaudio`
-first, then `pip install pyaudio`. The web UI uses your browser's built-in speech
-engine, so it needs none of this.
-
-**Configuration** (environment variables, see `.env.example`):
-
-| Variable | Default | Meaning |
+| Your computer | Download | Size |
 |---|---|---|
-| `JERVIS_HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` for a LAN/preview) |
-| `JERVIS_PORT` | `8765` | Web UI port |
-| `JERVIS_NO_BROWSER` | unset | Set to `1` to stop auto-opening a browser |
-| `JARVIS_DATA_DIR` | `.jarvis_data` | Where the SQLite database lives |
-| `OPENAI_API_KEY` | unset | Enables OpenAI chat |
-| `JARVIS_OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama server |
+| **Windows 10 / 11** | [Jervis.Setup.exe](https://github.com/TheJarvis-App/jarvis-app/releases/download/v1.0.5/Jervis.Setup.exe) | ~177 MB |
+| **macOS (Apple silicon)** | [Jervis-Mac-arm64.dmg](https://github.com/TheJarvis-App/jarvis-app/releases/download/v1.0.5/Jervis-Mac-arm64.dmg) | ~196 MB |
+
+Checksums: [SHA256SUMS.txt](https://github.com/TheJarvis-App/jarvis-app/releases/download/v1.0.5/SHA256SUMS.txt) ·
+[All releases](https://github.com/TheJarvis-App/jarvis-app/releases)
+
+Or use the one-command installers in this repo:
+
+```powershell
+# Windows — PowerShell (right-click → Run with PowerShell, or:)
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+
+```bash
+# macOS
+./install-mac.sh
+```
+
+Both scripts download the matching installer, verify it against the published
+SHA256 sums, and then launch it for you.
 
 ---
 
-## Tests
+## 2. Install
+
+**Windows**
+1. Run `Jervis.Setup.exe`.
+2. If SmartScreen says *"Windows protected your PC"*, click **More info → Run anyway** (the signing certificate is still building reputation).
+3. No admin rights needed. Jervis is added to the Start menu and desktop.
+
+**macOS**
+1. Open the `.dmg` and drag **Jervis** into **Applications**.
+2. First launch: macOS may say it can't check for malware → **System Settings → Privacy & Security → Open Anyway**.
+3. Grant the Accessibility permission when asked (that's what lets it click and type for you).
+
+---
+
+## 3. First start
+
+On first launch Jervis downloads its local AI engine ([Ollama](https://ollama.com)),
+the `llama3.2` model and an offline speech model — about **2.3 GB** on a Mac,
+**3.6 GB** on Windows (only ~2.3 GB is kept; the NVIDIA libraries are unpacked
+only on PCs with an NVIDIA GPU). Everything that doesn't need AI works while it
+downloads. If you already run Ollama, it uses yours.
+
+Then just say **"Hey Jervis"**. The app is ~190 MB to download and ~460 MB
+installed. With 16 GB of RAM it can also see pictures and your screen (a 3 GB
+vision model, downloaded only when you turn it on in **Settings → AI**).
+
+Settings (gear, top right): microphone, voice, wake phrase, which AI answers,
+computer control, weather city, privacy, optional services, start at login.
+Your data lives in `%APPDATA%\Jarvis` (Windows) or
+`~/Library/Application Support/Jarvis` (macOS).
+
+**Requirements:** Windows 10/11 or macOS on Apple silicon. **Linux is not
+supported** by the desktop app — see the fallback below.
+
+---
+
+## 4. Want the source code too?
+
+I didn't copy the upstream source into this repo: it's ~54 MB / ~600 files,
+mostly images, 3D assets and voice clips. Instead, pull it with:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements-dev.txt
-python3 -m pytest -q
+./get-source.sh            # macOS / Linux
+```
+
+```bat
+get-source.bat             :: Windows
+```
+
+That clones <https://github.com/TheJarvis-App/jarvis-app> into
+`jervis-app-source/` (gitignored, so it won't pollute your repo). To run from
+source you need Python 3.12 (3.11–3.14 on macOS), Node.js 20, and on macOS
+`brew install portaudio`; see the upstream `README.md` for the full build steps.
+
+---
+
+## 5. Linux / browser-only fallback
+
+The desktop app has no Linux build, so the browser-based Jervis assistant from
+the previous setup is still here in [`web-assistant/`](web-assistant/). It runs
+tasks, notes, reminders and an interactive web UI with just Python 3.10+:
+
+```bash
+cd web-assistant
+python3 -m jarvis.web       # then open http://127.0.0.1:8765
 ```
 
 ---
 
-## If you meant a different "Jervis"
+## Live preview in this workspace
 
-I looked these up while searching — tell me if one of them is the one you wanted
-and I'll swap the setup over:
-
-- **Desktop voice app that controls your PC/Mac** (mouse, keyboard, apps, music;
-  Windows/macOS installers; the product was called *Jervis* before being renamed
-  *Jarvis*): <https://arielzaha.github.io/jervis/> ·
-  <https://github.com/TheJarvis-App/jarvis-app>
-- **AI secretary web app** (chat, inbox, tasks, dashboards, voice):
-  <https://github.com/dfaldu387/carlos-jervis>
-- **Go task/automation runtime** (CLI, REST API, MCP):
-  <https://github.com/saaedimam/jervis>
-- **The original Jervis** (Jenkins CI job generator — not a personal assistant):
-  <https://github.com/samrocketman/jervis>
+`site/index.html` is a small download page with both installers and the setup
+steps; it's served on port 8000 so you can click straight through to the
+installers from the preview.
 
 ---
 
-## Licence
+## Licence & attribution
 
-MIT. Upstream code © 2026 Adib Sunasra; adaptations in this repo keep the same
-licence. See `LICENSE`.
+The desktop app is MIT © 2026 Ariel and Shalev. Installer binaries are downloaded
+directly from their GitHub Releases — they are **not** redistributed in this repo.
+The browser fallback in `web-assistant/` is MIT © 2026 Adib Sunasra.
+See [THIRD_PARTY.md](THIRD_PARTY.md).
