@@ -1,0 +1,475 @@
+"""Jarvis's settings: one JSON file in the user's data folder, edited from the Settings screen.
+
+Every setting is named after the environment variable the rest of Jarvis already reads (GROQ_API_KEY, LLM_BACKEND,
+...), and load() applies the saved values to os.environ. So every existing os.getenv() keeps working unchanged, and
+a developer's .env file keeps working too.
+
+Precedence, highest first:
+  1. variables already set in the real environment when Jarvis starts (a developer's shell, tests)
+  2. settings.json (what the user chose in the Settings screen)
+  3. .env (the old way of configuring Jarvis; still read, and imported into settings.json the first time)
+  4. the defaults below
+One exception: which AI answers (LLM_BACKEND). A line for it in .env decides, even over settings.json, so that one
+word in that file is enough to switch; choosing it in the Settings screen rewrites that line, so the two never disagree.
+
+The file is versioned so later releases can migrate it, and a damaged file is set aside (never silently lost) and
+replaced by defaults, so Jarvis always starts.
+"""
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+import threading
+import time
+
+import paths
+
+VERSION = 1
+FILE_NAME = "settings.json"
+
+# The Settings screen is built from this list, so a new setting only needs adding here.
+#   restart: the backend restarts to apply it (it's read once at startup)
+#   secret: never sent back to the window in full, only whether it is set
+SCHEMA = [
+    # --- AI ---
+    {"key": "LLM_BACKEND", "section": "AI", "label": "Which AI answers", "type": "choice", "default": "ollama",
+     "choices": [["ollama", "Local AI on this computer (no account needed; needs 4-8 GB of memory)"],
+                 ["auto", "Online AI (Groq), with the local AI as backup (needs 4-8 GB of memory)"],
+                 ["groq", "Online AI (Groq) only: the lightest, under 2 GB of memory"]],
+     "restart": True},
+    {"key": "GROQ_API_KEY", "section": "AI", "label": "Groq API key (optional)", "type": "secret", "default": "",
+     "help": "Only for the online AI: faster and smarter answers. Free at console.groq.com.", "restart": True},
+    {"key": "OLLAMA_MODEL", "section": "AI", "label": "Local AI model", "type": "text", "default": "llama3.2",
+     "help": "On a slower computer, llama3.2:1b answers faster. With 16 GB of memory, qwen2.5:7b is smarter, "
+             "especially at using the computer (a 4.7 GB download).", "restart": True, "advanced": True},
+    {"key": "JARVIS_LOCAL_VISION", "section": "AI", "label": "Let the local AI see pictures and the screen",
+     "type": "choice", "default": "auto",
+     "choices": [["auto", "Automatic (computers with 16 GB of memory or more)"], ["on", "On"], ["off", "Off"]],
+     "help": "A 3 GB download, made the first time Jarvis needs to see something, and plenty of free memory.",
+     "restart": True, "advanced": True},
+    {"key": "OLLAMA_VISION_MODEL", "section": "AI", "label": "Local vision model", "type": "text",
+     "default": "qwen2.5vl:3b", "help": "Lets the local AI see pictures and the screen.", "restart": True,
+     "advanced": True},
+    # --- Voice ---
+    {"key": "JARVIS_MIC", "section": "Voice", "label": "Microphone", "type": "device", "default": "",
+     "help": "Leave on System default unless Jarvis can't hear you."},
+    {"key": "JARVIS_VOICE", "section": "Voice", "label": "Jarvis's voice", "type": "voice", "default": ""},
+    {"key": "JARVIS_STT_LANGUAGE", "section": "Voice", "label": "Languages I speak", "type": "choice",
+     "default": "auto", "choices": [["auto", "English and Hebrew (told apart automatically)"], ["en", "English only"]],
+     "help": "English only uses a smaller speech model and skips the Hebrew downloads.", "restart": True},
+    {"key": "JARVIS_HEBREW_SPEECH", "section": "Voice", "label": "Hebrew speech recognition", "type": "choice",
+     "default": "large", "choices": [["large", "Most accurate (ivrit.ai large, 3 GB)"],
+                                     ["turbo", "Lighter (ivrit.ai turbo, 1.6 GB; a little less accurate)"]],
+     "restart": True, "advanced": True},
+    {"key": "JARVIS_HEBREW_VOICE", "section": "Voice", "label": "Hebrew voice", "type": "choice", "default": "neural",
+     "choices": [["neural", "Natural (Shaul, on this computer)"], ["windows", "Windows' Hebrew voice (Asaf)"]],
+     "advanced": True},
+    {"key": "JARVIS_REPLY_LANGUAGE", "section": "Voice", "label": "Jarvis answers in", "type": "choice",
+     "default": "auto", "choices": [["auto", "The language I spoke"], ["en", "Always English"],
+                                    ["he", "Always Hebrew"]]},
+    {"key": "JARVIS_WAKE_WORD", "section": "Voice", "label": "Wait for “Hey Jarvis”", "type": "toggle",
+     "default": "on", "help": "Off: Jarvis listens all the time while the microphone is on."},
+    {"key": "JARVIS_SPEAK_VOLUME", "section": "Voice", "label": "Speaking volume", "type": "text", "default": "100",
+     "help": "0-100. Set from the speaker control next to the microphone button.", "advanced": True},
+    {"key": "JARVIS_SPEAK_MUTED", "section": "Voice", "label": "Mute Jarvis's voice", "type": "toggle",
+     "default": "off", "advanced": True},
+    # --- Quick Access ---
+    {"key": "JARVIS_QUICK", "section": "Quick Access", "label": "Quick Access bar", "type": "toggle", "default": "on",
+     "help": "A small Jarvis bar at the top of the screen, opened with a shortcut from any app. Ask by typing or "
+             "talking; the main window stays where it is."},
+    {"key": "JARVIS_QUICK_SHORTCUT", "section": "Quick Access", "label": "Shortcut", "type": "choice",
+     "default": "hold-command" if sys.platform == "darwin" else "Alt+Space",
+     "choices": [["hold-command", "Hold ⌘ Command for 3 seconds (Ctrl on Windows); ⌥ Space works too"],
+                 ["Alt+Space", "⌥ Option + Space (Alt + Space on Windows)"],
+                 ["CommandOrControl+Shift+Space", "⌘ Command + Shift + Space (Ctrl + Shift + Space on Windows)"],
+                 ["Control+Alt+J", "⌃ Control + ⌥ Option + J (Ctrl + Alt + J on Windows)"],
+                 ["double-command", "Press ⌘ Command twice (Ctrl twice on Windows)"],
+                 ["double-option", "Press ⌥ Option twice (Alt twice on Windows)"],
+                 ["double-shift", "Press Shift twice"],
+                 ["custom", "My own key combination (set it below, with Show advanced on)"]],
+     "help": "Key combinations work in every app with no permission. A hold or a double press only counts when the "
+             "key is used alone, so ⌘C, ⌘Tab or typing capitals never opens it. With Jarvis closed, the Jarvis Wake "
+             "helper notices the hold and starts him with just the bar."},
+    {"key": "JARVIS_QUICK_CUSTOM", "section": "Quick Access", "label": "My own key combination", "type": "text",
+     "default": "Control+Shift+Space", "advanced": True,
+     "help": "Modifiers (Command, Control, Alt or Option, Shift) and one key, joined with +: Control+Shift+K, Alt+F1."},
+    {"key": "JARVIS_QUICK_INPUT", "section": "Quick Access", "label": "When it opens", "type": "choice",
+     "default": "text", "choices": [["text", "Ready to type"], ["voice", "Start listening"]]},
+    {"key": "JARVIS_QUICK_STAY", "section": "Quick Access", "label": "Keep it open when I click elsewhere",
+     "type": "toggle", "default": "on",
+     "help": "On: it stays until you close it (Esc, ×, or the shortcut again). Off: it tucks away when you click "
+             "another window, unless Jarvis is busy or showing an answer (an auto-clicker would close it too)."},
+    {"key": "JARVIS_QUICK_SIZE", "section": "Quick Access", "label": "Size", "type": "choice", "default": "regular",
+     "choices": [["compact", "Compact"], ["regular", "Regular"], ["wide", "Wide"]]},
+    {"key": "JARVIS_QUICK_POSITION", "section": "Quick Access", "label": "Position", "type": "choice",
+     "default": "center", "advanced": True,
+     "choices": [["center", "Top centre"], ["right", "Top right"]]},
+    # --- Computer control ---
+    {"key": "JARVIS_COMPUTER_CONTROL", "section": "Computer control", "label": "Let Jarvis use the mouse and keyboard",
+     "type": "choice", "default": "ask",
+     "choices": [["ask", "Ask me before each task"], ["on", "Allowed (still asks before risky steps)"],
+                 ["off", "Never"]]},
+    {"key": "JARVIS_SCREEN_VISION", "section": "Computer control", "label": "Look at the screen with",
+     "type": "choice", "default": "local",
+     "choices": [["local", "Local AI only (private; needs 16 GB of memory)"],
+                 ["online", "Online AI (Groq) too, if the local one isn't available"], ["off", "Never"]],
+     "help": "Used when Jarvis can't find something on screen through accessibility alone (some apps, like "
+             "Spotify, don't expose their buttons at all). A screenshot of your whole screen, not just one app, "
+             "so “Online” means that leaves this computer.", "advanced": True},
+    {"key": "JARVIS_PHONE_CONTROL", "section": "Computer control", "label": "Let your phone control this computer",
+     "type": "toggle", "default": "off",
+     "help": "A paired phone can ask Jarvis to open apps, play music, or search, and — with a relay address set "
+             "below — talk to Jarvis by voice from anywhere, not just this Wi-Fi. The first phone ever pairs "
+             "locally (a code to type); after that, each “connect my phone” sends a notification to tap "
+             "Confirmed/Not Confirmed on. Off by default.", "restart": True},
+    {"key": "JARVIS_RELAY_URL", "section": "Computer control", "label": "Relay address", "type": "text",
+     "default": "wss://jervis-relay.onrender.com/", "advanced": True, "restart": True,
+     "help": "Lets an already-paired phone reach Jarvis away from this Wi-Fi too. Points at a shared relay Jarvis "
+             "runs by default — it never sees anything meaningful (every message through it is end-to-end "
+             "encrypted with a key only your phone and this computer have; see phone_crypto.py). Clear this field "
+             "to keep phone control same-Wi-Fi only, or point it at your own relay instead (see relay/README.md)."},
+    # --- General ---
+    {"key": "JARVIS_USER_NAME", "section": "General", "label": "Your name", "type": "text", "default": "",
+     "help": "So Jarvis can greet you by name instead of “Sir”."},
+    {"key": "WEATHER_CITY", "section": "General", "label": "Weather city", "type": "text", "default": "",
+     "help": "For the weather panel, e.g. Tel Aviv or London."},
+    {"key": "JARVIS_CALENDAR", "section": "General", "label": "Add events to", "type": "choice", "default": "apple",
+     "choices": [["apple", "Apple Calendar (the Calendar app on this Mac)"], ["google", "Google Calendar"]],
+     "help": "Where “add a dentist appointment tomorrow at 5pm” goes, and what “check my calendar” reads."},
+    {"key": "JARVIS_APPLE_CALENDAR", "section": "General", "label": "Apple calendar to use", "type": "text", "default": "",
+     "advanced": True, "help": "The name of one of the Calendar app's calendars (e.g. Home or Work). Empty: the first one."},
+    {"key": "JARVIS_TRAILERS", "section": "General", "label": "Play trailers on", "type": "choice", "default": "youtube",
+     "choices": [["youtube", "YouTube"], ["netflix", "Netflix, when it has the show (else YouTube)"]],
+     "help": "Either way, saying “on Netflix” or “on YouTube” picks that one for a single trailer."},
+    {"key": "JARVIS_KEEP_TRANSCRIPTS", "section": "Privacy", "label": "Keep conversation logs on this computer",
+     "type": "toggle", "default": "on"},
+    {"key": "WHATSAPP_READING", "section": "Privacy", "label": "Let Jarvis read WhatsApp (macOS)", "type": "toggle",
+     "default": "on", "restart": True},
+    # --- Optional services ---
+    {"key": "OPENAI_API_KEY", "section": "Optional services", "label": "OpenAI API key", "type": "secret",
+     "default": "", "help": "Better pictures, and editing pictures.", "restart": True},
+    {"key": "CLOUDFLARE_ACCOUNT_ID", "section": "Optional services", "label": "Cloudflare account ID (pictures)",
+     "type": "text", "default": "",
+     "help": "Sharp FLUX pictures in seconds, free for hundreds a day: a free account at dash.cloudflare.com, its "
+             "account ID, and an API token with the Workers AI permission."},
+    {"key": "CLOUDFLARE_API_TOKEN", "section": "Optional services", "label": "Cloudflare API token (pictures)",
+     "type": "secret", "default": ""},
+    {"key": "POLLINATIONS_TOKEN", "section": "Optional services", "label": "Pollinations token (pictures)",
+     "type": "secret", "default": "", "advanced": True,
+     "help": "Optional: a free account at enter.pollinations.ai unlocks its better model and removes the watermark."},
+    {"key": "SPOTIFY_CLIENT_ID", "section": "Optional services", "label": "Spotify client ID", "type": "text",
+     "default": "", "restart": True, "advanced": True,
+     "help": "Create an app at developer.spotify.com/dashboard with the redirect URI http://localhost:8888/callback. "
+             "Needs Spotify Premium."},
+    {"key": "SPOTIFY_CLIENT_SECRET", "section": "Optional services", "label": "Spotify client secret",
+     "type": "secret", "default": "", "restart": True, "advanced": True},
+    {"key": "GOOGLE_ACCOUNT_LEARNING", "section": "Optional services", "label": "School Google account",
+     "type": "text", "default": "", "advanced": True,
+     "help": "The name of its Chrome profile, so school things open in the right account."},
+    {"key": "GOOGLE_ACCOUNT_PERSONAL", "section": "Optional services", "label": "Personal Google account",
+     "type": "text", "default": "", "advanced": True},
+    {"key": "GOOGLE_CALENDAR_CLIENT_ID", "section": "Optional services", "label": "Google Calendar client ID",
+     "type": "text", "default": "", "restart": True, "advanced": True,
+     "help": "A free Desktop app OAuth client from console.cloud.google.com, with the Calendar API turned on."},
+    {"key": "GOOGLE_CALENDAR_CLIENT_SECRET", "section": "Optional services", "label": "Google Calendar client secret",
+     "type": "secret", "default": "", "restart": True, "advanced": True},
+    {"key": "TWILIO_ACCOUNT_SID", "section": "Optional services", "label": "Twilio account SID", "type": "secret",
+     "default": "", "advanced": True,
+     "help": "Lets Jarvis text your phone (e.g. when it wants to pair) with no page or app needed. Free trial "
+             "account at twilio.com; all four Twilio fields are required together."},
+    {"key": "TWILIO_AUTH_TOKEN", "section": "Optional services", "label": "Twilio auth token", "type": "secret",
+     "default": "", "advanced": True},
+    {"key": "TWILIO_FROM_NUMBER", "section": "Optional services", "label": "Twilio phone number", "type": "text",
+     "default": "", "advanced": True, "help": "The number Twilio gave you, e.g. +15551234567."},
+    {"key": "TWILIO_TO_NUMBER", "section": "Optional services", "label": "Your phone number", "type": "text",
+     "default": "", "advanced": True, "help": "Where texts are sent, e.g. +15559876543."},
+]
+BY_KEY = {item["key"]: item for item in SCHEMA}
+_lock = threading.Lock()
+_values = {}          # what settings.json holds (only keys the user or the .env import set)
+_from_env_file = {}   # what .env holds
+_process_env = set()  # keys that were already in the real environment at startup: they always win
+_env_files = []       # the .env files that were read
+ENV_FILE_DECIDES = {"LLM_BACKEND"}   # a line for these in .env beats settings.json (see the top of this file)
+_OTHER_SPELLINGS = {"grok": "groq", "online": "groq", "local": "ollama", "both": "auto"}   # as people write them
+_first_run = False    # true only until the first save (the welcome screen, or Settings) — see is_first_run()
+
+
+def is_first_run() -> bool:
+    """Whether settings.json didn't exist when Jarvis started (an old .env still counts as "not set up through
+    this yet") — the window uses this to offer the welcome screen once, the first time Jarvis ever starts."""
+    return _first_run
+
+
+def path() -> str:
+    return os.path.join(paths.DATA_DIR, FILE_NAME)
+
+
+def _parse_env_file(file_path: str) -> dict:
+    values = {}
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip().removeprefix("export ").strip()
+                value = value.split(" #", 1)[0].strip().strip("\"'")
+                if key:
+                    values[key] = value
+    except (OSError, UnicodeDecodeError):
+        pass
+    return values
+
+
+def _decided_in_env_file(key: str):
+    """The choice a .env line makes for one of ENV_FILE_DECIDES ("Groq", "grok" and "local" are understood), or None
+    when there is no such line or it names nothing Jarvis knows."""
+    if key not in ENV_FILE_DECIDES or not _from_env_file.get(key):
+        return None
+    value = _from_env_file[key].strip().lower()
+    value = _OTHER_SPELLINGS.get(value, value)
+    return value if value in [choice[0] for choice in BY_KEY[key]["choices"]] else None
+
+
+def _rewrite_env_line(file_path: str, key: str, value: str) -> bool:
+    """Change `key`'s line in a .env file to the new value, leaving every other line exactly as it was. False when
+    the file has no line for it. Atomic, like the settings file: never a half-written .env."""
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            lines = f.read().splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return False
+    is_line = re.compile(rf"\s*(export\s+)?{re.escape(key)}\s*=")
+    found = False
+    for i, line in enumerate(lines):
+        if is_line.match(line):
+            lines[i] = f"{key}={value}" + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
+            found = True
+    if not found:
+        return False
+    fd, tmp = tempfile.mkstemp(prefix=".env-", dir=os.path.dirname(file_path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write("".join(lines))
+        shutil.copymode(file_path, tmp)
+        os.replace(tmp, file_path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def migrate(data: dict) -> dict:
+    """Bring an older settings file up to VERSION. Keys are never dropped, so nothing the user set is lost."""
+    version = int(data.get("version", 0) or 0)
+    values = dict(data.get("values", {}))
+    if version < 1:
+        values = {k: v for k, v in data.items() if k != "version"} if "values" not in data else values
+    # Future: if version < 2: rename or convert keys here.
+    return {"version": VERSION, "values": {k: str(v) for k, v in values.items() if isinstance(k, str)}}
+
+
+def _read_file() -> dict:
+    file_path = path()
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        return migrate(data)["values"]
+    except (OSError, ValueError, TypeError) as e:
+        backup = f"{file_path}.damaged-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.move(file_path, backup)
+        except OSError:
+            backup = "(could not be moved)"
+        print(f"Settings file was damaged ({e}); kept a copy at {backup} and started from defaults.", flush=True)
+        return {}
+
+
+def _write_file(values: dict) -> None:
+    """Atomic: a crash or power cut mid-save never leaves a half-written settings file."""
+    os.makedirs(paths.DATA_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".settings-", suffix=".json", dir=paths.DATA_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"version": VERSION, "values": values}, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp, path())
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+OLD_PREFIX, PREFIX = "JE" + "RVIS_", "JARVIS_"   # Jarvis was called Jervis: its settings were JERVIS_... keys
+
+
+def _renamed_keys(values: dict) -> dict:
+    """The same settings with any old-name key (JERVIS_PHONE_CONTROL) under its new name (JARVIS_PHONE_CONTROL).
+    A value already saved under the new name wins."""
+    out = {k: v for k, v in values.items() if not k.startswith(OLD_PREFIX)}
+    for k, v in values.items():
+        if k.startswith(OLD_PREFIX):
+            out.setdefault(PREFIX + k[len(OLD_PREFIX):], v)
+    return out
+
+
+def _adopt_old_environment() -> None:
+    """JERVIS_* variables set outside Jarvis (a shell profile, an old launcher) still count, as JARVIS_*."""
+    for k, v in list(os.environ.items()):
+        if k.startswith(OLD_PREFIX):
+            os.environ.setdefault(PREFIX + k[len(OLD_PREFIX):], v)
+
+
+def load() -> None:
+    """Read everything and apply it to os.environ. Call once, before the rest of Jarvis reads its configuration."""
+    global _values, _from_env_file, _process_env, _first_run, _env_files
+    with _lock:
+        _adopt_old_environment()
+        _process_env = {k for k in os.environ}
+        env_files = [os.path.join(paths.RESOURCE_DIR, ".env"), os.path.join(paths.DATA_DIR, ".env")]
+        _from_env_file = {}
+        _env_files = list(dict.fromkeys(env_files))   # the same folder when running from source
+        for file_path in _env_files:
+            _from_env_file.update(_parse_env_file(file_path))
+        _from_env_file = _renamed_keys(_from_env_file)
+        for key in ENV_FILE_DECIDES:
+            if _from_env_file.get(key) and _decided_in_env_file(key) is None:
+                print(f"The .env file says {key}={_from_env_file[key]}, which isn't one of: "
+                      + ", ".join(choice[0] for choice in BY_KEY[key]["choices"])
+                      + ". Using the choice from Settings instead.", flush=True)
+        first_run = not os.path.exists(path())
+        _first_run = first_run   # no settings.json yet — whether or not there's an old .env to import from below
+        _values = _read_file()
+        if any(k.startswith(OLD_PREFIX) for k in _values):
+            _values = _renamed_keys(_values)   # settings saved under the old name: kept, under the new keys
+            try:
+                _write_file(_values)
+            except OSError as e:
+                print(f"Could not save the settings file: {e}", flush=True)
+        if first_run and _from_env_file:
+            # First start with this settings system: keep what the user already configured in .env.
+            imported = {k: v for k, v in _from_env_file.items() if k in BY_KEY and v}
+            _values.update(imported)
+            if not _values.get("LLM_BACKEND") and _values.get("GROQ_API_KEY"):
+                _values["LLM_BACKEND"] = "groq"   # someone with a key keeps the online AI, and the light memory use
+            if not paths.FROZEN:
+                # Upgrading a copy that ran from source: its weather panel always showed Ramat Gan; keep that.
+                _values.setdefault("WEATHER_CITY", "Ramat Gan, Israel")
+            try:
+                _write_file(_values)
+            except OSError as e:
+                print(f"Could not save the settings file: {e}", flush=True)
+        _apply()
+
+
+def _effective(key: str) -> str:
+    if key in _process_env and key in os.environ:
+        return os.environ[key]
+    decided = _decided_in_env_file(key)
+    if decided is not None:
+        return decided
+    if key in _values:
+        return _values[key]
+    if key in _from_env_file:
+        return _from_env_file[key]
+    item = BY_KEY.get(key)
+    return item["default"] if item else ""
+
+
+def _apply() -> None:
+    for key in set(BY_KEY) | set(_from_env_file) | set(_values):
+        if key in _process_env:
+            continue
+        value = _effective(key)
+        if value == "" and key not in BY_KEY:
+            continue
+        os.environ[key] = value
+
+
+def get(key: str) -> str:
+    with _lock:
+        return _effective(key)
+
+
+def validate(key: str, value) -> str:
+    """The cleaned value, or raises ValueError with a message fit to show the user."""
+    item = BY_KEY.get(key)
+    if item is None:
+        raise ValueError(f"unknown setting {key!r}")
+    value = "" if value is None else str(value).strip()
+    if len(value) > 500:
+        raise ValueError(f"{item['label']} is too long")
+    if item["type"] == "choice" and value not in [c[0] for c in item["choices"]]:
+        raise ValueError(f"{item['label']}: choose one of the listed options")
+    if item["type"] == "toggle" and value not in ("on", "off"):
+        raise ValueError(f"{item['label']} must be on or off")
+    if key == "JARVIS_SPEAK_VOLUME":
+        if not value.isdigit() or not 0 <= int(value) <= 100:
+            raise ValueError(f"{item['label']} must be a number from 0 to 100")
+    if key == "JARVIS_QUICK_CUSTOM" and value and not is_accelerator(value):
+        raise ValueError(f"{item['label']}: use modifiers and one key joined with +, like Control+Shift+K")
+    if any(ch in value for ch in "\r\n\0"):
+        raise ValueError(f"{item['label']} can't contain line breaks")
+    return value
+
+
+_MODIFIERS = {"command", "cmd", "control", "ctrl", "commandorcontrol", "cmdorctrl", "alt", "option", "altgr", "shift", "super", "meta"}
+_KEYS = (set("abcdefghijklmnopqrstuvwxyz0123456789") | {f"f{n}" for n in range(1, 25)}
+         | {"space", "tab", "backspace", "delete", "insert", "return", "enter", "up", "down", "left", "right", "home",
+            "end", "pageup", "pagedown", "escape", "esc", "plus", "-", "=", "[", "]", ";", "'", ",", ".", "/", "\\", "`"})
+
+
+def is_accelerator(value: str) -> bool:
+    """A key combination the window can register (Electron's accelerator format): at least one modifier, one key."""
+    parts = [p.strip().lower() for p in str(value).split("+")]
+    return len(parts) >= 2 and all(p in _MODIFIERS for p in parts[:-1]) and parts[-1] in _KEYS and len(set(parts)) == len(parts)
+
+
+def update(changes: dict) -> dict:
+    """Validate and save several settings at once. Returns {"saved": [...], "restart": bool}; raises ValueError (and
+    saves nothing) if any value is invalid."""
+    global _first_run
+    changes = {key: value for key, value in (changes or {}).items()
+               # public_view() shows a stored secret as "set"; sending that back means "unchanged", not the word "set"
+               if not (BY_KEY.get(key, {}).get("type") == "secret" and value == "set")}
+    cleaned = {key: validate(key, value) for key, value in changes.items()}
+    with _lock:
+        before = {key: _effective(key) for key in cleaned}
+        for key in cleaned:
+            if key in ENV_FILE_DECIDES and _from_env_file.get(key):   # .env decides this one: change it there too
+                try:
+                    if any([_rewrite_env_line(file_path, key, cleaned[key]) for file_path in _env_files]):
+                        _from_env_file[key] = cleaned[key]
+                except OSError as e:
+                    raise ValueError(f"{BY_KEY[key]['label']} is set in the .env file, which couldn't be changed "
+                                     f"({e}). Change the {key} line there instead.")
+        _values.update(cleaned)
+        _write_file(_values)
+        _first_run = False   # settings.json now exists (or is being written to) either way: no longer "new"
+        _process_env.difference_update(cleaned)   # a value chosen in Settings now beats the startup environment
+        _apply()
+        changed = [key for key in cleaned if before[key] != cleaned[key]]
+    return {"saved": changed, "restart": any(BY_KEY[k].get("restart") for k in changed)}
+
+
+def public_view() -> dict:
+    """What the Settings screen needs: the schema and current values, with secrets reduced to "is it set"."""
+    with _lock:
+        values = {}
+        for item in SCHEMA:
+            value = _effective(item["key"])
+            values[item["key"]] = ("set" if value else "") if item["type"] == "secret" else value
+        return {"schema": SCHEMA, "values": values, "file": path()}

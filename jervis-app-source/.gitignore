@@ -1,0 +1,64 @@
+# Secrets and personal data: never committed
+.env
+.cache
+.cache-*
+.calendar_token.json
+.jarvis-netflix-profile/
+transcripts/
+logs/
+images/
+documents/
+timers.json
+*_cache.json
+settings.json
+phone_devices.json
+vapid_key.pem
+push_subscriptions.json
+relay_identity.json
+agent_memory.json
+
+# Environments, dependencies, build output
+venv
+*.nosync
+.venv/
+node_modules
+__pycache__/
+*.pyc
+.electron-cache/
+build/
+dist/
+backend-dist/
+release/
+
+# Old hand-made copies of the app
+*.zip
+
+# The website has its own repository (ArielZaha/jarvis)
+website/
+
+# Downloaded ML models (large binaries, fetched at runtime)
+models/
+
+# Local tooling
+.DS_Store
+.claude/
+.playwright-cli/
+.impeccable/
+.pytest_cache/
+
+# Build logs
+*.log
+.jervis-netflix-profile/
+.tmp/
+
+# Jarvis's own data in a copy run from source (Coding Mode history and backups), and graphify's generated map
+coding_history.json
+code_backups/
+graphify-out/
+coding_chats/
+coding_prefs.json
+coding_audit.log*
+coding_history_removed.json
+
+# a marker the engine writes after asking macOS for Accessibility once (local, per computer)
+accessibility-asked

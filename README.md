@@ -77,23 +77,34 @@ supported** by the desktop app — see the fallback below.
 
 ---
 
-## 4. Want the source code too?
+## 4. The full source code is in this repo
 
-I didn't copy the upstream source into this repo: it's ~54 MB / ~600 files,
-mostly images, 3D assets and voice clips. Instead, pull it with:
+The entire upstream app source is vendored in
+[`jervis-app-source/`](jervis-app-source/) — **594 files, ~34 MB** (the upstream
+clone is ~54 MB including its own `.git` history). It is a verbatim copy at commit
+`7d06964` (2026-10-24); only the nested `.git/` directory was removed. See
+[`jervis-app-source/VENDORED.md`](jervis-app-source/VENDORED.md) for provenance
+and [`jervis-app-source/README.md`](jervis-app-source/README.md) for the
+upstream documentation.
+
+To run it from source you need Python 3.12 (3.11–3.14 on macOS), Node.js 20,
+and on macOS `brew install portaudio`:
 
 ```bash
-./get-source.sh            # macOS / Linux
+cd jervis-app-source
+npm install
+npm start              # Electron desktop window
 ```
 
-```bat
-get-source.bat             :: Windows
+Refresh the vendored copy from upstream with:
+
+```bash
+./get-source.sh        # macOS / Linux
+get-source.bat         # Windows
 ```
 
-That clones <https://github.com/TheJarvis-App/jarvis-app> into
-`jervis-app-source/` (gitignored, so it won't pollute your repo). To run from
-source you need Python 3.12 (3.11–3.14 on macOS), Node.js 20, and on macOS
-`brew install portaudio`; see the upstream `README.md` for the full build steps.
+Those scripts re-clone upstream and overwrite `jervis-app-source/` (keeping
+`VENDORED.md`). Review `git status` afterwards before committing.
 
 ---
 
@@ -120,7 +131,8 @@ installers from the preview.
 
 ## Licence & attribution
 
-The desktop app is MIT © 2026 Ariel and Shalev. Installer binaries are downloaded
-directly from their GitHub Releases — they are **not** redistributed in this repo.
-The browser fallback in `web-assistant/` is MIT © 2026 Adib Sunasra.
+The desktop app source is MIT © 2026 Ariel and Shalev
+([`jervis-app-source/LICENSE`](jervis-app-source/LICENSE)). Installer binaries are
+downloaded directly from their GitHub Releases — they are **not** redistributed
+here. The browser fallback in `web-assistant/` is MIT © 2026 Adib Sunasra.
 See [THIRD_PARTY.md](THIRD_PARTY.md).

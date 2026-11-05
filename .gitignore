@@ -57,8 +57,7 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# Jervis desktop installers / upstream source (fetched locally, not committed)
+# Jervis desktop installers (downloaded locally, not committed)
 Jervis.Setup.exe
 Jervis-Mac-arm64.dmg
 SHA256SUMS.txt
-jervis-app-source/

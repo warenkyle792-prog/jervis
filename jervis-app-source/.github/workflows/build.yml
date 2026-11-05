@@ -1,0 +1,198 @@
+# Builds the installers on real Windows and macOS machines, runs the tests, and installs each build fresh to check it.
+# A tag like v1.0.0 also publishes them as a GitHub release.
+name: Build installers
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: --win
+            installer: release/Jarvis Setup.exe
+          - os: macos-14
+            platform: --mac
+            installer: release/*.dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: PortAudio (for the microphone package)
+        if: runner.os == 'macOS'
+        run: |
+          brew install portaudio
+          echo "CFLAGS=-I$(brew --prefix)/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$(brew --prefix)/lib" >> "$GITHUB_ENV"
+
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt pyinstaller
+
+      - name: Tests
+        env:
+          JARVIS_AUDIO: 'off'
+        run: python -m pytest -q
+
+      - name: Computer control on a real desktop (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true   # hosted runners' desktops may not take input; the result is still worth reading
+        run: python tests/installer/windows_control.py
+
+      - name: Build Jarvis's engine
+        run: pyinstaller --noconfirm --distpath backend-dist --workpath build/pyinstaller jarvis-backend.spec
+
+      - name: Engine self-test
+        shell: bash
+        run: |
+          export JARVIS_DATA_DIR="$RUNNER_TEMP/selftest"
+          ./backend-dist/jarvis-backend/jarvis-backend --selftest | grep '^SELFTEST'
+
+      - name: Offline speech in a folder with Hebrew letters (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:JARVIS_DATA_DIR = Join-Path $env:RUNNER_TEMP 'ג׳רוויס בדיקה'
+          $report = ./backend-dist/jarvis-backend/jarvis-backend.exe --selftest --speech | Select-String '^SELFTEST'
+          Write-Host $report
+          if ($LASTEXITCODE -ne 0 -or -not ("$report" -match '"offline_speech": "ok')) { exit 1 }
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Signing identity (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MAC_SIGNING_P12: ${{ secrets.MAC_SIGNING_P12 }}
+          MAC_SIGNING_PASSWORD: ${{ secrets.MAC_SIGNING_PASSWORD }}
+        run: |
+          # Every build signed with the same (self-made) certificate: macOS then keeps the permissions people gave
+          # Jarvis (Accessibility, microphone) across updates. Without it, each build has a new ad-hoc signature.
+          if [ -z "$MAC_SIGNING_P12" ]; then echo "No signing certificate: ad-hoc signature."; exit 0; fi
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$KC"
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p ci "$KC"
+          echo "$MAC_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security import "$RUNNER_TEMP/sign.p12" -k "$KC" -P "$MAC_SIGNING_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "Jarvis Code Signing" -p "$KC" > "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          security find-identity -v -p codesigning "$KC"
+          echo "JARVIS_MAC_IDENTITY=Jarvis Code Signing" >> "$GITHUB_ENV"
+
+      - name: Build the installer
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder ${{ matrix.platform }} --publish never
+
+      - name: SignPath availability check (Windows)
+        # Free code signing for open-source projects, which is what stops SmartScreen from calling the
+        # installer unrecognized: https://signpath.io/product/open-source . Apply at
+        # https://signpath.org/apply.html, create a project (slug "jarvis") with a "test-signing" and a
+        # "release-signing" policy once approved, then add the SIGNPATH_API_TOKEN and SIGNPATH_ORG_ID repo
+        # secrets. Until those secrets exist, the installer is built and tested unsigned, same as today.
+        if: runner.os == 'Windows'
+        id: signpath_check
+        shell: bash
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if [ -z "$SIGNPATH_API_TOKEN" ]; then
+            echo "No SignPath credentials: installer stays unsigned."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the unsigned installer for signing
+        if: steps.signpath_check.outputs.configured == 'true'
+        id: upload_unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-installer-unsigned
+          path: release/Jarvis Setup.exe
+          retention-days: 1
+
+      - name: Submit to SignPath and wait for the signed installer
+        if: steps.signpath_check.outputs.configured == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ secrets.SIGNPATH_ORG_ID }}'
+          project-slug: 'jarvis'
+          signing-policy-slug: ${{ startsWith(github.ref, 'refs/tags/v') && 'release-signing' || 'test-signing' }}
+          github-artifact-id: '${{ steps.upload_unsigned.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'release-signed'
+
+      - name: Replace the installer with the signed one
+        if: steps.signpath_check.outputs.configured == 'true'
+        shell: bash
+        run: mv "release-signed/Jarvis Setup.exe" "release/Jarvis Setup.exe"
+
+      - name: Installer reliability (Windows, diagnostic)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: ./tests/installer/windows_stress.ps1 -Installer "release/Jarvis Setup.exe" -Rounds 12
+
+      - name: Fresh install test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/installer/windows_smoke.ps1 -Installer "release/Jarvis Setup.exe"
+
+      - name: Fresh install test (macOS)
+        if: runner.os == 'macOS'
+        run: bash tests/installer/mac_smoke.sh release/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-${{ runner.os }}
+          path: ${{ matrix.installer }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd installers
+          sha256sum * > SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "Jarvis $GITHUB_REF_NAME" \
+            --notes "Windows: run Jarvis Setup.exe. Mac (Apple Silicon): open the .dmg and drag Jarvis to Applications. Checksums in SHA256SUMS.txt."

@@ -1,0 +1,1093 @@
+"""Spotify without developer keys: Jarvis drives the Spotify app on this computer.
+
+Spotify's online developer interface needs keys that belong to whoever registered an app with Spotify, so an
+installed Jarvis has none (and Spotify caps such apps at 25 listeners). Everything here works with just the Spotify
+app installed and signed in:
+
+- play something: bring Spotify to the front, open its Quick Search (Cmd+K / Ctrl+K), type the request and press
+  Shift+Enter, which is Spotify's own "play the selected result"; then check that the music really changed.
+- pause, resume, next, previous, what's playing: Spotify's AppleScript commands on a Mac; the media keys on Windows,
+  where Spotify's window title ("Artist - Song" while playing) tells whether it's playing.
+
+The keys go to Spotify only: if it isn't in front when the keys would be pressed, nothing is typed.
+"""
+import os
+import re
+import subprocess
+import sys
+import time
+
+IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
+
+
+class SpotifyLocalError(Exception):
+    """Something the user should hear, in plain words."""
+
+
+# ---------- is Spotify there / running ----------
+def installed() -> bool:
+    if IS_MAC:
+        return os.path.isdir("/Applications/Spotify.app") or os.path.isdir(os.path.expanduser("~/Applications/Spotify.app"))
+    if IS_WIN:
+        return bool(_win_spotify_exe()) or _win_store_app()
+    return False
+
+
+def running() -> bool:
+    if IS_MAC:
+        return subprocess.run(["pgrep", "-x", "Spotify"], capture_output=True).returncode == 0
+    if IS_WIN:
+        return bool(_win_windows())
+    return False
+
+
+# ---------- macOS ----------
+def _osa(command: str, timeout: float = 8.0) -> str:
+    out = subprocess.run(["osascript", "-e", f'tell application "Spotify" to {command}'], capture_output=True,
+                         text=True, timeout=timeout)
+    if out.returncode != 0:
+        raise SpotifyLocalError(out.stderr.strip() or "Spotify didn't answer.")
+    return out.stdout.strip()
+
+
+def _mac_now() -> tuple:
+    """(state, track url, "Song by Artist") of Spotify, without starting it."""
+    if not running():
+        return "stopped", "", ""
+    try:
+        state = _osa("player state as text")
+        if state == "stopped":
+            return state, "", ""
+        url = _osa("spotify url of current track")
+        name = _osa('(name of current track) & " by " & (artist of current track)')
+        return state, url, name
+    except (SpotifyLocalError, subprocess.SubprocessError):
+        return "stopped", "", ""
+
+
+def mac_ready(wait: float = 25.0) -> None:
+    """macOS: Spotify open and answering its commands, opening it in the background if it's closed (a just-opened
+    Spotify takes a few seconds before it plays anything). Raises SpotifyLocalError if it doesn't come up."""
+    deadline = time.time() + wait
+    if not running():
+        subprocess.run(["open", "-g", "-a", "Spotify"], capture_output=True)   # -g: opens without taking the screen
+    while True:
+        try:
+            _osa("player state as text", timeout=4)
+            return
+        except (SpotifyLocalError, subprocess.SubprocessError):
+            if time.time() > deadline:
+                raise SpotifyLocalError("Spotify didn't open in time. Try again in a moment.")
+            time.sleep(0.5)
+
+
+def mac_play_uri(uri: str, title: str = "", position_seconds=None, wait: float = 25.0) -> str:
+    """macOS: the Spotify app on this Mac plays exactly `uri` (a track, or a playlist, album or artist from the start),
+    told directly by AppleScript, and the "Song by Artist" now playing is returned once Spotify reports it.
+
+    Spotify's Web API can accept a play command for this computer and then play nothing (seen 2026-10-24: "Julia"
+    accepted, nothing loaded); the app's own command doesn't go through Spotify's servers and starts at once. Spotify
+    is opened in the background first if it's closed, and the command is given again if the first one was too early.
+    Raises SpotifyLocalError if it doesn't start."""
+    if not IS_MAC or not installed():
+        raise SpotifyLocalError("Spotify isn't installed on this Mac.")
+    if not re.fullmatch(r"spotify:(track|album|playlist|artist|show|episode):[A-Za-z0-9]+", uri or ""):
+        raise SpotifyLocalError("That isn't something Spotify can play.")
+    deadline = time.time() + wait
+    mac_ready(wait)
+    before = _mac_now()[1]
+    is_track = uri.startswith("spotify:track:")
+    first = title.lower().split(" - ")[0].strip()
+    for attempt in range(3):
+        try:
+            _osa(f'play track "{uri}"')
+        except (SpotifyLocalError, subprocess.SubprocessError):
+            pass
+        for poll in range(15):
+            time.sleep(0.4)
+            state, url, name = _mac_now()
+            if state != "playing" or not url:
+                continue
+            # a track: that very one (or Spotify's own copy of it for this country, which has another link);
+            # a playlist, album or artist: playing, from something new or after a moment (an album picks up where
+            # it was last left, which can be the song that was already on)
+            if (url == uri or (first and name.lower().startswith(first))) if is_track else (url != before or poll >= 2 or attempt):
+                if position_seconds:
+                    try:
+                        _osa(f"set player position to {int(position_seconds)}")
+                    except (SpotifyLocalError, subprocess.SubprocessError):
+                        pass
+                return name
+        if time.time() > deadline:
+            break
+    raise SpotifyLocalError("I asked the Spotify app to play it, but it didn't start.")
+
+
+def _mac_bring_forward() -> bool:
+    import AppKit
+    import screen_mac   # front_app / running_app: read fresh (AppKit's own lists never update in Jarvis's engine)
+    if not running():
+        subprocess.run(["open", "-a", "Spotify"], check=False)
+        for _ in range(60):   # a cold start takes a few seconds, longer on a computer Jarvis's own AI is loading down
+            time.sleep(0.25)
+            if running():
+                break
+        time.sleep(4)         # let its window and Quick Search get ready
+    app = None
+    for _ in range(20):   # just launched: launch services may need a moment to list it
+        app = screen_mac.running_app("Spotify")
+        if app is not None:
+            break
+        time.sleep(0.25)
+    if app is None:
+        return False
+    for attempt in range(2):   # activateWithOptions_ alone doesn't always win focus from a background process
+        (app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps) if attempt == 0
+         else subprocess.run(["open", "-a", "Spotify"], check=False))
+        for _ in range(40):
+            time.sleep(0.15)
+            if screen_mac.front_name() == "Spotify":
+                break
+        else:
+            continue
+        if _window_bounds() is not None:   # frontmost doesn't mean it has a window: Spotify can run with none open
+            return True
+        subprocess.run(["open", "-a", "Spotify"], check=False)   # this reopens its main window, not just the app
+        for _ in range(40):
+            time.sleep(0.15)
+            if _window_bounds() is not None:
+                return True
+    return False
+
+
+def _mac_keys(*keys: str) -> None:
+    import screen_mac
+    screen_mac.MacScreen().press_keys(list(keys))
+
+
+def _mac_type(text: str) -> None:
+    import screen_mac
+    screen_mac.MacScreen().type_text(text)
+
+
+def _mac_can_press_keys() -> bool:
+    import screen_mac
+    return screen_mac.MacScreen.trusted()
+
+
+def _mac_ask_for_accessibility() -> None:
+    """Ask macOS for the Accessibility permission: that's what puts Jarvis in the Accessibility list at all (an app
+    that only checks is never listed). The first time macOS shows its own dialog; after that the settings page opens."""
+    import screen_mac
+    screen_mac.MacScreen().available()
+
+
+# ---------- Windows ----------
+def _win_spotify_exe() -> str:
+    path = os.path.join(os.environ.get("APPDATA", ""), "Spotify", "Spotify.exe")
+    return path if os.path.exists(path) else ""
+
+
+def _win_store_app() -> bool:
+    try:
+        import app_launcher
+        return app_launcher.resolve_app("spotify")[0] == "ok"
+    except Exception:
+        return False
+
+
+def _win_windows() -> list:
+    import winctl
+    return [(h, t) for h, t in winctl.list_windows() if winctl.window_process_name(h) == "spotify.exe"]
+
+
+def _win_title() -> str:
+    windows = _win_windows()
+    return windows[0][1] if windows else ""
+
+
+def _win_playing_title(title: str) -> bool:
+    """Spotify's window is called "Artist - Song" while playing, "Spotify Premium" / "Spotify Free" when paused."""
+    return bool(title) and not title.lower().startswith("spotify")
+
+
+def _win_bring_forward() -> bool:
+    import winctl
+    if not _win_windows():
+        exe = _win_spotify_exe()
+        if exe:
+            subprocess.Popen([exe], creationflags=0x08000000)
+        else:
+            os.startfile("spotify:")  # type: ignore[attr-defined]   (the Microsoft Store version)
+        for _ in range(60):
+            time.sleep(0.25)
+            if _win_windows():
+                break
+        time.sleep(2.5)
+    windows = _win_windows()
+    if not windows:
+        return False
+    winctl.focus(windows[0][0])
+    for _ in range(20):
+        time.sleep(0.1)
+        if winctl.window_process_name(winctl.foreground_window()) == "spotify.exe":
+            return True
+    return False
+
+
+# ---------- what Jarvis uses ----------
+def now_playing() -> tuple:
+    """(is it playing, "Song by Artist" or "")."""
+    if IS_MAC:
+        state, _url, name = _mac_now()
+        return state == "playing", name
+    if IS_WIN:
+        title = _win_title()
+        if _win_playing_title(title):
+            artist, _, song = title.partition(" - ")
+            return True, f"{song} by {artist}" if song else title
+        return False, ""
+    return False, ""
+
+
+def is_playing() -> bool:
+    return now_playing()[0]
+
+
+def play(query: str) -> str:
+    """Find `query` with Spotify's Quick Search and play the first result. Returns what's playing now."""
+    query = " ".join((query or "").split())
+    if not query:
+        raise SpotifyLocalError("Tell me what to play.")
+    if not installed():
+        raise SpotifyLocalError("Spotify isn't installed on this computer. Get it from spotify.com and sign in, "
+                                "then ask me again.")
+    if IS_MAC and not _mac_can_press_keys():
+        _mac_ask_for_accessibility()
+        _mac_open_search(query)
+        raise SpotifyLocalError("I opened your search in Spotify: press play on it. To let me press play myself, "
+                                "turn on Jarvis in System Settings, Privacy & Security, Accessibility, then ask me "
+                                "again.")
+    before = _mac_now()[1] if IS_MAC else _win_title()
+    if not (_mac_bring_forward() if IS_MAC else _win_bring_forward()):
+        raise SpotifyLocalError("I couldn't bring Spotify to the front, so I didn't type anything. Open Spotify and "
+                                "ask me again.")
+    # Escape first: Cmd+K toggles Quick Search, so one left open would be closed instead of opened.
+    if IS_MAC:
+        _mac_keys("escape")
+        time.sleep(0.3)
+        _mac_keys("cmd", "k")
+        time.sleep(0.7)
+        _mac_keys("cmd", "a")          # replace anything left in the box
+        _mac_type(query)
+        time.sleep(1.8)                # results come from Spotify's servers
+        _mac_keys("shift", "enter")
+    else:
+        import winctl
+        winctl.press("esc", strict=True)
+        time.sleep(0.3)
+        winctl.press("ctrl", "k", strict=True)
+        time.sleep(0.7)
+        winctl.press("ctrl", "a", strict=True)
+        winctl.type_text(query, strict=True)
+        time.sleep(1.8)
+        winctl.press("shift", "enter", strict=True)
+    # Did the music change?
+    started = ""
+    for _ in range(24):
+        time.sleep(0.25)
+        if IS_MAC:
+            state, url, name = _mac_now()
+            if state == "playing" and url != before:
+                started = name
+                break
+        else:
+            title = _win_title()
+            if _win_playing_title(title) and title != before:
+                artist, _, song = title.partition(" - ")
+                started = f"{song} by {artist}" if song else title
+                break
+    _close_quick_search()
+    if started:
+        return started
+    playing, name = now_playing()
+    if playing and name:
+        return name   # the result was what was already playing
+    raise SpotifyLocalError(f"I searched Spotify for {query} but couldn't start it. It's on the screen: press play "
+                            "on the one you want.")
+
+
+class NotFound(SpotifyLocalError):
+    """Nothing Spotify returned is close to what was asked; `closest` is the nearest result (or None)."""
+
+    def __init__(self, message, closest=None, searched=()):
+        super().__init__(message)
+        self.closest, self.searched = closest, list(searched)
+
+
+# ---------- Windows: Spotify's search results, read and chosen ----------
+# Spotify's Windows app exposes its page to UI Automation (a Chromium document): every search result is there with
+# its title, what it is, its artists, the link to it (with its exact ID) and its own Play button. So Jarvis reads
+# the results, picks the one that was meant (spotify_match, by rules), presses THAT result's Play button, and then
+# checks the player's "Now playing: <song> by <artist>" really is it. (Spotify's Mac app shows no content to
+# accessibility: there the Quick Search below is all there is.)
+_PLAY_WORDS = ("play", "הפעל", "נגן")
+_PLAYER = ("now playing bar", "player controls", "סרגל ההשמעה")
+
+
+def _ui():
+    try:
+        import uiautomation as auto
+        return auto
+    except Exception:
+        return None
+
+
+def ui_available() -> bool:
+    return IS_WIN and _ui() is not None
+
+
+def _ui_root():
+    auto = _ui()
+    windows = _win_windows()
+    return auto.ControlFromHandle(windows[0][0]) if auto and windows else None
+
+
+class _Node:
+    """A control as it was when read (its type and name kept), the control itself behind it for acting on."""
+
+    def __init__(self, control, kind, name):
+        self.control, self.ControlTypeName, self.Name = control, kind, name
+
+    def __getattr__(self, attr):
+        return getattr(self.control, attr)
+
+
+def _ui_nodes(root, max_depth=70) -> list:
+    """The page as [(control, depth, parent index)], in reading order. A part of the page that changes while it's
+    read (the playing song's row animates; results arrive) is skipped, not the whole page."""
+    nodes = []
+
+    def visit(c, depth, parent):
+        try:
+            node = _Node(c, c.ControlTypeName, c.Name or "")
+        except Exception:
+            return
+        nodes.append((node, depth, parent))
+        here = len(nodes) - 1
+        if depth >= max_depth:
+            return
+        try:
+            kids = c.GetChildren()
+        except Exception:
+            return
+        for k in kids:
+            visit(k, depth + 1, here)
+
+    visit(root, 0, -1)
+    return nodes
+
+
+def _link_value(c) -> str:
+    try:
+        return c.GetValuePattern().Value or ""
+    except Exception:
+        return ""
+
+
+def results_from_nodes(nodes, query="") -> list:
+    """Every playable result on the page: {"uri", "kind", "title", "artists", "position", "query", "button"} — a
+    result is the smallest part of the page holding a Play button and a link to a track, album, playlist, artist
+    or show (the player bar at the bottom is not a result)."""
+    import spotify_match
+    links = {}   # node index -> (kind, uri, name)
+    for i, (c, _d, _p) in enumerate(nodes):
+        if c.ControlTypeName == "HyperlinkControl":
+            got = spotify_match.uri_of(_link_value(c))
+            if got:
+                links[i] = (got[0], got[1], (c.Name or "").strip())
+    # which links each node holds (its own subtree)
+    held = {i: [] for i in range(len(nodes))}
+    for i in sorted(links):
+        p = i
+        while p != -1:
+            held[p].append(i)
+            p = nodes[p][2]
+    in_player = set()
+    for i, (c, _d, _p) in enumerate(nodes):
+        if (c.Name or "").strip().lower() in _PLAYER:
+            j = i + 1
+            while j < len(nodes) and nodes[j][1] > nodes[i][1]:
+                in_player.add(j)
+                j += 1
+    out, seen = [], set()
+    for i, (c, _d, _p) in enumerate(nodes):
+        name = (c.Name or "").strip()
+        if c.ControlTypeName != "ButtonControl" or i in in_player or \
+                not name.lower().startswith(_PLAY_WORDS) or name.lower().startswith(("playlist", "player")):
+            continue
+        p = nodes[i][2]
+        while p != -1 and not held[p]:
+            p = nodes[p][2]
+        if p == -1:
+            continue
+        mine = [links[k] for k in held[p]]
+        primary = next((l for l in mine if l[0] not in ("artist", "user")), None) or mine[0]
+        if primary[1] in seen:
+            continue
+        seen.add(primary[1])
+        artists = [l[2] for l in mine if l[0] == "artist" and l[1] != primary[1]]
+        out.append({"uri": primary[1], "kind": primary[0], "title": primary[2], "artists": list(dict.fromkeys(artists)),
+                    "position": len(out), "query": query, "button": c})
+    return out
+
+
+def _ui_find(root, kind: str, **match):
+    """One control by type and name, found by UI Automation itself (fast), or None."""
+    auto = _ui()
+    try:
+        c = getattr(auto, kind)(searchFromControl=root, searchDepth=45, **match)
+        return c if c.Exists(0.2, 0.05) else None
+    except Exception:
+        return None
+
+
+def _ui_search_box_text(root) -> str:
+    box = _ui_find(root, "ComboBoxControl", SubName="play?") or _ui_find(root, "EditControl", SubName="play?")
+    try:
+        return (box.GetValuePattern().Value or "") if box else ""
+    except Exception:
+        return ""
+
+
+def _ui_results(root, query: str) -> list:
+    """The results on the page: from its results list when Spotify shows one, else from the whole page."""
+    grid = _ui_find(root, "DataGridControl", Name="Search results") or         _ui_find(root, "GroupControl", SubName="Search") or root
+    try:
+        return results_from_nodes(_ui_nodes(grid), query)
+    except Exception as e:   # the page changed under us (it re-renders as results arrive): read it again
+        print(f"Spotify page changed while reading it ({type(e).__name__}); reading again", flush=True)
+        return []
+
+
+_last_page = None   # the first results of the last search read (a page that hasn't changed yet looks like this)
+
+
+def ui_search(query: str, wait: float = 15.0) -> list:
+    """Spotify's results for `query` (its search page, opened by its own spotify:search: link — nothing typed)."""
+    from urllib.parse import quote
+    import spotify_match
+    os.startfile(f"spotify:search:{quote(query)}")  # type: ignore[attr-defined]
+    global _last_page
+    want = spotify_match.normalize(query)
+    deadline, last, results = time.time() + wait, None, []
+    time.sleep(0.6)
+    while time.time() < deadline:
+        root = _ui_root()
+        if root is None:
+            time.sleep(0.4)
+            continue
+        box = spotify_match.normalize(_ui_search_box_text(root).replace("+", " "))
+        if box and box != want:   # still the page before
+            time.sleep(0.4)
+            continue
+        results = _ui_results(root, query)
+        ids = [r["uri"] for r in results[:6]]
+        # the page shows this search (its box says so — or, with the box not readable while the window comes up,
+        # its results are new and have settled) and it has (mostly) loaded
+        if results and ((box == want and (ids == last or len(results) >= 4)) or
+                        (not box and ids == last and ids != _last_page)):
+            _last_page = ids
+            return results
+        last = ids
+        time.sleep(0.4)
+    return results
+
+
+def ui_now_playing() -> dict:
+    """{"playing": bool, "title", "artist"} from Spotify's player bar ("Now playing: <song> by <artist>")."""
+    root = _ui_root()
+    out = {"playing": False, "title": "", "artist": ""}
+    if root is None:
+        return out
+    auto = _ui()
+    bar = auto.GroupControl(searchFromControl=root, searchDepth=40, Name="Now playing bar")
+    if not bar.Exists(1.0, 0.1):
+        return out
+    for c, _d in auto.WalkControl(bar, maxDepth=6):
+        name = (c.Name or "").strip()
+        m = re.match(r"^Now playing:\s*(?P<t>.+?)\s+by\s+(?P<a>.+)$", name)
+        if m and not out["title"]:
+            out["title"], out["artist"] = m.group("t"), m.group("a")
+        if c.ControlTypeName == "ButtonControl" and name.lower() in ("pause", "השהה", "השהיה"):
+            out["playing"] = True
+    return out
+
+
+def _press(button) -> bool:
+    try:
+        button.GetInvokePattern().Invoke()
+        return True
+    except Exception:
+        try:
+            button.Click(simulateMove=False, waitTime=0.2)
+            return True
+        except Exception:
+            return False
+
+
+def play_request(request: str, intent: dict = None) -> dict:
+    """Play what `request` asks for, exactly: search Spotify (as said, then other spellings/scripts while nothing
+    fits), rank every result (spotify_match), press the chosen result's own Play button, and check the player shows
+    it. Returns {"uri", "kind", "title", "artists", "score", "verdict", "now"}; raises NotFound when nothing fits,
+    SpotifyLocalError when it couldn't be started (saying what really happened)."""
+    import spotify_match
+    intent = intent or spotify_match.parse(request)
+    if not intent["text"]:
+        raise SpotifyLocalError("Tell me what to play.")
+    if not installed():
+        raise SpotifyLocalError("Spotify isn't installed on this computer. Get it from spotify.com and sign in, "
+                                "then ask me again.")
+    if not ui_available():   # (a Mac): Spotify's own Quick Search, top result
+        name = play(" ".join(filter(None, [intent.get("title") or intent["text"], intent.get("artist")])))
+        return {"uri": None, "kind": "track", "title": name, "artists": [], "score": None, "verdict": "quick search",
+                "now": name}
+    if not _win_bring_forward():
+        raise SpotifyLocalError("I couldn't bring Spotify up, so I didn't play anything. Open Spotify and ask me "
+                                "again.")
+    found, searched, pick, page = [], [], None, None
+    for q in spotify_match.queries(intent):
+        results = ui_search(q)
+        searched.append(q)
+        found += results
+        page = q
+        pick = spotify_match.choose(intent, found)
+        print(f"Spotify search {q!r}: {len(results)} results; best so far "
+              f"{spotify_match.describe(pick['best']) if pick['best'] else '-'} ({pick['score']:.2f})", flush=True)
+        if spotify_match.settled(intent, pick):
+            break
+    if not pick or pick["verdict"] == "none":
+        closest = pick["best"] if pick else None
+        raise NotFound(f"I couldn't find {intent['text']} on Spotify." +
+                       (f" The closest was {spotify_match.describe(closest)}." if closest else ""), closest, searched)
+    best = dict(pick["best"], score=pick["score"], verdict=pick["verdict"])
+    if best["query"] != page:   # it was on an earlier search's page: show that one again
+        best["button"] = None
+    return _press_and_check(best)
+
+
+def play_exact(cand: dict) -> dict:
+    """Play exactly this result (by its URI) — one offered earlier and accepted with a "yes"."""
+    if not ui_available():
+        raise SpotifyLocalError("I can only play an exact Spotify result on Windows, or with Spotify keys set up.")
+    if not _win_bring_forward():
+        raise SpotifyLocalError("I couldn't bring Spotify up, so I didn't play anything.")
+    return _press_and_check(dict(cand, button=None, verdict="confident", score=None))
+
+
+def _press_and_check(best: dict) -> dict:
+    """Press `best`'s own Play button (finding it again by its URI on its search's page if needed) and check the
+    player shows it playing. The result as played, or SpotifyLocalError saying what really happened."""
+    import spotify_match
+    if best.get("button") is None:
+        again = [r for r in ui_search(best["query"]) if r["uri"] == best["uri"]]
+        if not again:
+            raise SpotifyLocalError(f"Spotify stopped showing {spotify_match.describe(best)}, so I didn't play it.")
+        best = dict(best, button=again[0]["button"])
+    def its(now):   # is the player on this result? (a track by its title, an artist by who's playing)
+        if not now.get("title"):
+            return False
+        if best["kind"] == "track":
+            return spotify_match.similarity(now["title"], best["title"]) > 0.8
+        if best["kind"] == "artist":
+            return spotify_match.similarity(best["title"], now["artist"]) > 0.7 or \
+                spotify_match.normalize(best["title"]) in spotify_match.normalize(now["artist"])
+        return False
+
+    def done(now):
+        out = {k: best.get(k) for k in ("uri", "kind", "title", "artists", "score", "verdict", "query")}
+        out["now"] = f"{now['title']} by {now['artist']}"
+        return out
+
+    before = ui_now_playing()
+    if before["playing"] and its(before):
+        return done(before)   # already playing it: its Play button would only pause it
+    if not _press(best["button"]):
+        raise SpotifyLocalError(f"I found {spotify_match.describe(best)} but Spotify didn't let me press play on it.")
+    now, pressed_again, steady = {}, False, 0
+    for k in range(30):   # up to ~9 s: Spotify (and a computer busy with a local AI) can be slow to start
+        time.sleep(0.3)
+        now = ui_now_playing()
+        started = now["playing"] and now["title"] and (
+            its(now) or (best["kind"] not in ("track", "artist") and
+                         (now["title"] != before.get("title") or not before.get("playing"))))
+        steady = steady + 1 if started else 0
+        if steady >= 2:   # playing, and still playing a moment later (not a flicker before a pause)
+            return done(now)
+        if k == 8 and not started and not now["playing"] and not pressed_again:
+            # nothing new, and paused: Spotify took the press as pause (it thought this was what was playing,
+            # or the previous one was) — once more starts it
+            pressed_again = True
+            _press(best["button"])
+    raise SpotifyLocalError(f"I pressed play on {spotify_match.describe(best)}, but Spotify " +
+                            (f"is playing {now['title']} by {now['artist']} instead." if now.get("playing") and
+                             now.get("title") else "didn't start playing it."))
+
+
+def _close_quick_search() -> None:
+    """Leave Spotify tidy: Quick Search stays open after playing from it."""
+    try:
+        if IS_MAC:
+            _mac_keys("escape")
+        elif IS_WIN:
+            import winctl
+            winctl.press("esc")
+    except Exception:
+        pass
+
+
+def open_search(query: str) -> bool:
+    """Show Spotify's search results for `query` (opening Spotify if needed). False if Spotify isn't installed."""
+    from urllib.parse import quote
+    if not installed():
+        return False
+    if IS_MAC:
+        _mac_open_search(query)
+    elif IS_WIN:
+        os.startfile(f"spotify:search:{quote(query)}")  # type: ignore[attr-defined]
+    return True
+
+
+def _mac_open_search(query: str) -> None:
+    from urllib.parse import quote
+    subprocess.run(["open", f"spotify:search:{quote(query)}"], check=False)
+
+
+def pause() -> bool:
+    if IS_MAC:
+        if not running():
+            return False
+        _osa("pause")
+        return True
+    if IS_WIN:
+        if not _win_playing_title(_win_title()):
+            return False
+        import winctl
+        winctl.media_key("play_pause")
+        return True
+    return False
+
+
+def resume() -> bool:
+    if IS_MAC:
+        if not running():
+            return False
+        _osa("play")
+        return True
+    if IS_WIN:
+        if not _win_windows():
+            return False
+        if not _win_playing_title(_win_title()):
+            import winctl
+            winctl.media_key("play_pause")
+        return True
+    return False
+
+
+def skip(direction: str) -> str:
+    """"next" or "previous"; returns what's playing afterwards (or "")."""
+    if IS_MAC:
+        if not running():
+            raise SpotifyLocalError("Spotify isn't open.")
+        if direction == "next":
+            _osa("next track")
+        else:
+            if float(_osa("player position") or 0) > 3:
+                _osa("previous track")   # the first press only restarts the song
+            _osa("previous track")
+    elif IS_WIN:
+        if not _win_windows():
+            raise SpotifyLocalError("Spotify isn't open.")
+        import winctl
+        winctl.media_key("next" if direction == "next" else "prev")
+    time.sleep(0.9)
+    return now_playing()[1]
+
+
+def seek(seconds: int) -> bool:
+    """Jump to a time in the song (Mac only: Windows has no way to do it without Spotify's online interface)."""
+    if IS_MAC and running():
+        _osa(f"set player position to {int(seconds)}")
+        return True
+    return False
+
+
+def clean_query(text: str) -> str:
+    """"My Favorite Songs playlist" -> "My Favorite Songs" (Quick Search finds it by name)."""
+    text = re.sub(r"\b(?:the\s+)?(?:playlist|album|song|track)\b", " ", text or "", flags=re.I)
+    return " ".join(text.split()).strip(" \"'“”")
+
+
+# ---------- the visible way: when you asked Jarvis to take control ----------
+# The same Quick Search as play(), done so you can follow it: the pointer moves to the search box and to the result,
+# the request is typed letter by letter, and the results appear before the top one is played. Spotify's Mac app
+# doesn't let other programs see its buttons, so Jarvis points at the result and plays it with Spotify's own play
+# key (Shift+Enter) instead of clicking a place he can't see.
+TYPE_DELAY = 0.09   # seconds between letters
+RESULTS_WAIT = 3.5   # seconds to let Spotify's search results load before looking for one
+# how long to wait for playback to actually start before giving up: generous, since Jarvis's own local AI (several
+# GB, running alongside everything else) can make the whole computer slower to respond than usual.
+PLAYBACK_WAIT_STEPS = 48
+PLAYBACK_WAIT_INTERVAL = 0.3   # -> up to 14.4s
+
+
+def cursor():
+    if IS_MAC:
+        import Quartz
+        point = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        return int(point.x), int(point.y)
+    if IS_WIN:
+        import winctl
+        return winctl.cursor_position()
+    return None
+
+
+def _glide(x: int, y: int, seconds: float = 0.6) -> None:
+    """Move the pointer there smoothly, so it can be followed."""
+    start = cursor() or (x, y)
+    steps = 24
+    for i in range(1, steps + 1):
+        t = i / steps
+        t = t * t * (3 - 2 * t)   # ease in and out
+        px, py = start[0] + (x - start[0]) * t, start[1] + (y - start[1]) * t
+        if IS_MAC:
+            import Quartz
+            event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (px, py), Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetFlags(event, 0)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        elif IS_WIN:
+            import ctypes
+            ctypes.windll.user32.SetCursorPos(int(px), int(py))
+        time.sleep(seconds / steps)
+
+
+def _type_slowly(text: str) -> None:
+    for letter in text:
+        if IS_MAC:
+            _mac_type(letter)
+        else:
+            import winctl
+            winctl.type_text(letter, strict=True)
+        time.sleep(TYPE_DELAY)
+
+
+def _window_bounds():
+    """(x, y, width, height) of Spotify's main window, or None. This comes from the window server (what's on
+    screen), not accessibility — Spotify's window doesn't expose any content to accessibility at all (confirmed:
+    even with Jarvis's accessibility permission on, its window has zero readable elements beyond its menu bar), so
+    there is no real button or field for Jarvis to find and click the way he can in other apps."""
+    if IS_MAC:
+        import Quartz
+        windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+        best = None
+        for info in windows or []:
+            if info.get("kCGWindowOwnerName") == "Spotify" and info.get("kCGWindowLayer", 0) == 0:
+                b = info.get("kCGWindowBounds") or {}
+                box = (int(b.get("X", 0)), int(b.get("Y", 0)), int(b.get("Width", 0)), int(b.get("Height", 0)))
+                if not best or box[2] * box[3] > best[2] * best[3]:
+                    best = box
+        return best
+    if IS_WIN:
+        import ctypes
+        from ctypes import wintypes
+        windows = _win_windows()
+        if not windows:
+            return None
+        rect = wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(windows[0][0], ctypes.byref(rect))
+        return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    return None
+
+
+def _keys(*keys: str) -> None:
+    if IS_MAC:
+        _mac_keys(*("cmd" if k == "command" else k for k in keys))
+    else:
+        import winctl
+        winctl.press(*("ctrl" if k == "command" else ("esc" if k == "escape" else k) for k in keys), strict=True)
+
+
+def _looks_like_a_match(query: str, playing_name: str) -> bool:
+    """A rough sanity check on what Spotify actually started playing: does it share a real word with what was
+    asked for? Not strict (Spotify's own search can reasonably return a close alternative spelling), just a safety
+    net against reporting success for whatever happened to already be selected — which is how "play Jane" once
+    ended up reporting an unrelated song as playing."""
+    q_words = {w for w in re.findall(r"[\w']+", query.lower()) if len(w) > 2}
+    if not q_words:
+        return True
+    n_words = {w for w in re.findall(r"[\w']+", (playing_name or "").lower()) if len(w) > 2}
+    return bool(q_words & n_words)
+
+
+def _screen():
+    if IS_MAC:
+        import screen_mac
+        return screen_mac.MacScreen()
+    import screen_windows
+    return screen_windows.WindowsScreen()
+
+
+def visible_steps(query: str) -> list:
+    """The steps of playing `query` so you can watch, as (what you see, function) for computer_use.ScriptedTask.
+
+    Spotify's Mac app doesn't expose its window content to accessibility, so there is no search field or play
+    button Jarvis can find and click by reading the window the way the general computer-control engine does in
+    other apps. When looking at a screenshot is available (Settings, Computer control), Jarvis uses that instead —
+    a real vision model finds the real search bar and the real matching result, and both are clicked for real.
+    Otherwise, the only remaining real, visible way in is Spotify's own keyboard shortcuts (Cmd+K opens its Quick
+    Search, typing goes straight into it, Shift+Enter plays the selected result). Either way, nothing is ever
+    trusted blindly: every version checks that something actually started playing, *and* that it has a real word
+    in common with what was asked for, before ever calling it done."""
+    import screen_vision
+    query = " ".join((query or "").split())
+    if screen_vision.available():
+        return _visible_steps_by_sight(query)
+    return _visible_steps_by_shortcut(query)
+
+
+def open_uri(uri: str) -> None:
+    """Shows a spotify: address (a playlist, an album, the Liked Songs page) in the Spotify app."""
+    if IS_MAC:
+        subprocess.run(["open", uri], check=False, timeout=10)
+    elif IS_WIN:
+        os.startfile(uri)   # type: ignore[attr-defined]
+
+
+def exact_steps(find, confirm, start=None) -> list:
+    """Take control of Spotify without reading the screen, for when Jarvis can look things up in Spotify (the user's
+    Spotify keys): each step is visible in the app, and none of them is a guess.
+
+      find()        -> (uri, label): the exact playlist, album, artist or song (raises SpotifyLocalError if it isn't found)
+      confirm(uri)  -> True when Spotify reports that very thing playing, False when something else is, None if unknown
+      start(uri)    -> starts it through Spotify itself; on a Mac the app's own AppleScript command is used first
+
+    Spotify comes to the front, opens the playlist's (album's, song's) page so you see where it is, and plays it;
+    "done" is said only when Spotify confirms that exact thing is playing."""
+    state = {}
+
+    def open_spotify():
+        if not installed():
+            raise SpotifyLocalError("Spotify isn't installed on this computer.")
+        state["before"] = _mac_now()[1] if IS_MAC else _win_title()
+        if not (_mac_bring_forward() if IS_MAC else _win_bring_forward()):
+            raise SpotifyLocalError("I couldn't bring Spotify to the front, so I stopped before touching anything.")
+
+    def find_it():
+        state["uri"], state["label"] = find()
+
+    def show_it():
+        uri = state["uri"]
+        if not uri.startswith("spotify:"):
+            return
+        open_uri(uri)
+        time.sleep(2.0)   # its page opens in the app, in view
+
+    def play_it():
+        uri = state["uri"]
+        started = False
+        if IS_MAC and uri.split(":")[1] in ("playlist", "album", "artist", "track", "episode", "show"):
+            try:   # (the liked songs can't be started this way: given their address, the app keeps playing what it was)
+                _osa(f'play track "{uri}"')
+                started = True
+            except Exception as e:
+                print(f"Spotify's play command didn't take {uri}: {e!r}", flush=True)
+        if not started:
+            if start is None:
+                raise SpotifyLocalError(f"I opened {state['label']} in Spotify but couldn't start it: press play there.")
+            start(uri)
+        other = ""
+        for _ in range(PLAYBACK_WAIT_STEPS):
+            time.sleep(PLAYBACK_WAIT_INTERVAL)
+            playing, name = now_playing()
+            if not playing:
+                continue
+            sure = confirm(uri)
+            if sure is True or (sure is None and (_mac_now()[1] if IS_MAC else _win_title()) != state.get("before")):
+                return f"Playing {state['label']} on Spotify" + (f" (now: {name})." if name else ".")
+            if sure is False:   # Spotify may still report the last thing for a moment: only a lasting mismatch counts
+                other = name or "something else"
+        if other:
+            raise SpotifyLocalError(f"Spotify is playing {other}, not {state['label']}, so I'm not calling it done — "
+                                    "please check what's playing.")
+        raise SpotifyLocalError(f"I opened {state['label']} in Spotify, but it didn't start playing. It's on the screen: "
+                                "press play there.")
+
+    return [("Opening Spotify", open_spotify),
+            ("Finding it in your Spotify", find_it),
+            ("Opening it in Spotify", show_it),
+            ("Playing it", play_it)]
+
+
+def _visible_steps_by_sight(query: str) -> list:
+    import screen_vision
+    state = {}
+
+    def env():
+        if "env" not in state:
+            state["env"] = _screen()
+        return state["env"]
+
+    def vision():
+        if "vision" not in state:
+            state["vision"] = screen_vision.ScreenVision()
+        return state["vision"]
+
+    def spotify_view():
+        """A screenshot cropped to just Spotify's own window (its (x, y) offset, for mapping a point in the crop
+        back to real screen coordinates): with the rest of the screen out of the picture, Spotify's own UI is a
+        much larger fraction of what the vision model sees, and there's nothing else on screen to confuse it with."""
+        obs = env().observe()
+        if obs.screenshot is None:
+            raise SpotifyLocalError("I don't have permission to see the screen, so I can't find things in Spotify. "
+                                    "Grant Screen Recording to Jarvis in System Settings, Privacy & Security.")
+        box = _window_bounds()
+        if box is None:
+            raise SpotifyLocalError("Spotify doesn't have a window open, so I stopped instead of guessing where "
+                                    "to click.")
+        x, y, w, h = box
+        cropped = obs.screenshot.crop((x, y, x + w, y + h))
+        return cropped, (x, y), (w, h)
+
+    def open_spotify():
+        if not installed():
+            raise SpotifyLocalError("Spotify isn't installed on this computer.")
+        state["before"] = _mac_now()[1] if IS_MAC else _win_title()
+        if not (_mac_bring_forward() if IS_MAC else _win_bring_forward()):
+            raise SpotifyLocalError("I couldn't bring Spotify to the front, so I stopped before touching anything.")
+        time.sleep(1.0)
+
+    def click_search_bar():
+        shot, (ox, oy), size = spotify_view()
+        # asking for the visible words landed reliably inside the field in testing; asking for "the search bar" or
+        # an icon both landed near the wrong (nearby) icon instead.
+        point = vision().locate(shot, 'the placeholder text "What do you want to play?"', size)
+        if point is None:
+            raise SpotifyLocalError("I couldn't find Spotify's search bar on screen, so I stopped instead of "
+                                    "clicking somewhere unsafe.")
+        point = (point[0] + ox, point[1] + oy)
+        state["search_point"] = point
+        _glide(*point)
+        env().click(point)
+        time.sleep(0.6)
+
+    def type_it():
+        _type_slowly(query)
+
+    def wait_for_results():
+        time.sleep(RESULTS_WAIT)
+
+    def point_at_result():
+        # Tested extensively against the real app: Shift+Enter ("play the selected result", the assumption the
+        # keyboard-shortcut fallback relies on) does nothing at all in the current Spotify — confirmed, not a
+        # guess. Finding one specific row precisely is hard for this vision model in a dense list, but it's the
+        # only mechanism that has ever actually clicked the right thing in testing, so it's what's used, backed by
+        # the match check in play_it() so a wrong guess is reported as a failure, never a false success.
+        shot, (ox, oy), size = spotify_view()
+        point = vision().locate(shot, f'the text "{query}" (the song title, in the results list)', size)
+        if point is None:
+            raise SpotifyLocalError(f"I searched Spotify for {query} but didn't see a matching result on screen, "
+                                    "so I stopped instead of playing something else.")
+        state["result_point"] = (point[0] + ox, point[1] + oy)
+        _glide(*state["result_point"])
+        time.sleep(0.6)
+
+    def play_it():
+        env().click(state["result_point"])
+        for _ in range(PLAYBACK_WAIT_STEPS):
+            time.sleep(PLAYBACK_WAIT_INTERVAL)
+            playing, name = now_playing()
+            now = _mac_now()[1] if IS_MAC else _win_title()
+            if playing and now != state.get("before"):
+                if not _looks_like_a_match(query, name):
+                    raise SpotifyLocalError(f"Spotify started playing {name}, but that doesn't look like a match "
+                                            f"for {query}, so I'm not calling it done — please check what's playing.")
+                return f"Playing {name} on Spotify." if name else "Playing it on Spotify."
+        playing, name = now_playing()
+        if playing and name:
+            if not _looks_like_a_match(query, name):
+                raise SpotifyLocalError(f"Spotify is playing {name}, but that doesn't look like a match for "
+                                        f"{query}, so I'm not calling it done — please check what's playing.")
+            return f"Playing {name} on Spotify."
+        raise SpotifyLocalError(f"I searched Spotify for {query} but it didn't start. The results are on the screen.")
+
+    return [("Opening Spotify", open_spotify),
+            ("Clicking the search bar", click_search_bar),
+            (f"Typing “{query}”", type_it),
+            ("Searching", wait_for_results),
+            ("Pointing at the results", point_at_result),
+            ("Playing it", play_it)]
+
+
+def _visible_steps_by_shortcut(query: str) -> list:
+    state = {}
+
+    def open_spotify():
+        if not installed():
+            raise SpotifyLocalError("Spotify isn't installed on this computer.")
+        state["before"] = _mac_now()[1] if IS_MAC else _win_title()
+        if not (_mac_bring_forward() if IS_MAC else _win_bring_forward()):
+            raise SpotifyLocalError("I couldn't bring Spotify to the front, so I stopped before touching anything.")
+        time.sleep(1.0)
+
+    def open_search():
+        box = _window_bounds()
+        if box:
+            x, y, w, h = box
+            state["search"] = (x + w // 2, y + min(170, h // 4))   # where Quick Search's box opens
+            state["result"] = (x + w // 2, y + min(250, h // 3))   # its first result, just below
+            _glide(*state["search"])
+        _keys("escape")        # Cmd+K toggles Quick Search: start from closed
+        time.sleep(0.5)
+        _keys("command", "k")
+        time.sleep(1.0)
+        _keys("command", "a")
+
+    def type_it():
+        _type_slowly(query)
+
+    def wait_for_results():
+        time.sleep(RESULTS_WAIT)
+
+    def point_at_result():
+        if state.get("result"):
+            _glide(*state["result"])
+        time.sleep(0.6)
+
+    def play_it():
+        _keys("shift", "enter")
+        for _ in range(PLAYBACK_WAIT_STEPS):
+            time.sleep(PLAYBACK_WAIT_INTERVAL)
+            playing, name = now_playing()
+            now = _mac_now()[1] if IS_MAC else _win_title()
+            if playing and now != state.get("before"):
+                _close_quick_search()
+                if not _looks_like_a_match(query, name):
+                    raise SpotifyLocalError(f"Spotify started playing {name}, but that doesn't look like a match "
+                                            f"for {query}, so I'm not calling it done — please check what's playing.")
+                return f"Playing {name} on Spotify." if name else "Playing it on Spotify."
+        _close_quick_search()
+        playing, name = now_playing()
+        if playing and name:
+            if not _looks_like_a_match(query, name):
+                raise SpotifyLocalError(f"Spotify is playing {name}, but that doesn't look like a match for "
+                                        f"{query}, so I'm not calling it done — please check what's playing.")
+            return f"Playing {name} on Spotify."
+        raise SpotifyLocalError(f"I searched Spotify for {query} but it didn't start. The results are on the screen.")
+
+    return [("Opening Spotify", open_spotify),
+            ("Clicking into the search bar", open_search),
+            (f"Typing “{query}”", type_it),
+            ("Searching", wait_for_results),
+            ("Pointing at the top result", point_at_result),
+            ("Playing it", play_it)]

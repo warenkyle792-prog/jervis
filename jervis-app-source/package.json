@@ -1,0 +1,121 @@
+{
+  "name": "jarvis",
+  "productName": "Jarvis",
+  "version": "1.0.6",
+  "description": "Jarvis, a voice assistant that runs on your own computer",
+  "author": "Ariel and Shalev",
+  "homepage": "https://arielzaha.github.io/jervis/",
+  "license": "MIT",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "backend": "pyinstaller --noconfirm --distpath backend-dist --workpath build/pyinstaller jarvis-backend.spec",
+    "dist": "electron-builder --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:mac": "electron-builder --mac --publish never"
+  },
+  "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "io.github.arielzaha.jervis",
+    "productName": "Jarvis",
+    "copyright": "© 2026 Ariel and Shalev",
+    "directories": {
+      "output": "release",
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "package.json",
+      "main.js",
+      "backend.js",
+      "keys.js",
+      "renderer.js",
+      "panels.js",
+      "orb.js",
+      "bg.js",
+      "graph.js",
+      "sphere_gl.js",
+      "earth.js",
+      "planet.js",
+      "weather/**",
+      "clock/**",
+      "coding/**",
+      "projector/**",
+      "quick.js",
+      "quick/**",
+      "index.html",
+      "style.css",
+      "style.next.css",
+      "control.html",
+      "control.js",
+      "control-preload.js",
+      "assets/**",
+      "vendor/**"
+    ],
+    "extraResources": [
+      {
+        "from": "backend-dist/jarvis-backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "toolsets": {
+      "nsis": "1.2.1"
+    },
+    "afterPack": "build-resources/after-pack.js",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "executableName": "Jarvis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "include": "build-resources/installer.nsh",
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Jarvis",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Jarvis Setup.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "artifactName": "Jarvis-Mac-${arch}.${ext}",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Jarvis listens for “Hey Jarvis” and for what you ask him.",
+        "NSAppleEventsUsageDescription": "Jarvis controls apps you ask him to use, like Spotify or your browser.",
+        "LSApplicationCategoryType": "public.app-category.productivity"
+      }
+    },
+    "dmg": {
+      "title": "Jarvis ${version}"
+    }
+  }
+}

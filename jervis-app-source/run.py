@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""Start Jarvis on macOS or Windows with one command:   python run.py
+
+The first run sets everything up (a private Python environment, the Python packages, the window's Node packages) and
+creates a .env file to fill in. After that it just starts Jarvis, and its window opens right away.
+"""
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import zipfile
+
+VERSION = "1.0.6"  # printed at start, so it is obvious which copy of Jarvis is running
+ROOT = os.path.dirname(os.path.abspath(__file__))
+IS_WIN = sys.platform == "win32"
+VENV = os.path.join(ROOT, "venv")
+VENV_PYTHON = os.path.join(VENV, "Scripts" if IS_WIN else "bin", "python.exe" if IS_WIN else "python")
+REQUIREMENTS = os.path.join(ROOT, "requirements.txt")
+STAMP = os.path.join(VENV, ".requirements-installed")
+ELECTRON_OK = os.path.join(ROOT, "node_modules", "electron", "path.txt")  # written when Electron's program was downloaded
+
+
+def say(message: str) -> None:
+    print(f"[Jarvis] {message}", flush=True)
+
+
+def run(cmd: list, **kwargs) -> int:
+    return subprocess.call(cmd, cwd=ROOT, **kwargs)
+
+
+# ---------- Windows: a folder path with non-English letters breaks Electron's installer ----------
+def is_plain_path(path: str) -> bool:
+    return path.isascii()
+
+
+def move_to_plain_folder() -> None:
+    """If this folder's path has non-English letters (e.g. C:\\Users\\<Hebrew name>\\...), the window's installer fails
+    silently. Copy Jarvis to C:\\Jarvis and continue from there."""
+    if not IS_WIN or is_plain_path(ROOT):
+        return
+    target = os.environ.get("JARVIS_PLAIN_ROOT") or r"C:\Jarvis"
+    say("This folder's path has non-English letters, which stops Jarvis's window from installing.")
+    say(f"Copying Jarvis to {target} and continuing from there (your files here stay untouched)...")
+    # .git is excluded: it's not needed to run Jarvis, it's large, and git marks its object files
+    # read-only on Windows, which makes a second copy (overwriting a .git left by the first) fail
+    # with "Permission denied" and abort the whole move.
+    skip_names = ("venv", "node_modules", "__pycache__", "transcripts", "images", ".electron-cache", ".tmp", ".git")
+    skip = shutil.ignore_patterns(*skip_names, "*.zip")
+    try:
+        os.makedirs(target, exist_ok=True)
+        for name in os.listdir(ROOT):
+            source, destination = os.path.join(ROOT, name), os.path.join(target, name)
+            if name in skip_names or name.endswith(".zip"):
+                continue
+            if name == ".env" and os.path.exists(destination):
+                continue  # keep the key already pasted into the new folder
+            if os.path.isdir(source):
+                shutil.copytree(source, destination, dirs_exist_ok=True, ignore=skip)
+            else:
+                shutil.copy2(source, destination)
+    except OSError as e:
+        say(f"Could not copy to {target}: {e}")
+        say("Please move the whole Jarvis folder to a path with only English letters (for example C:\\Jarvis) and run it again.")
+        sys.exit(1)
+    say(f"Done. From now on start Jarvis from {target}  (double-click start_jarvis.bat there).")
+    try:
+        sys.exit(subprocess.call([sys.executable, os.path.join(target, "run.py")], cwd=target))
+    except KeyboardInterrupt:   # Ctrl+C: Jarvis was quit, which is not an error to print a traceback for
+        sys.exit(0)
+
+
+def use_utf8_console() -> None:
+    """Windows' console shows Hebrew and curly quotes as scrambled symbols (Jarvis writes them as UTF-8, the console
+    reads them in its own old code page) unless it is told the text is UTF-8."""
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def ensure_python_environment() -> None:
+    if not os.path.exists(VENV_PYTHON):
+        say("Creating a private Python environment (first run only)...")
+        if run([sys.executable, "-m", "venv", VENV]) != 0:
+            sys.exit("Could not create the Python environment.")
+    stale = not os.path.exists(STAMP) or os.path.getmtime(STAMP) < os.path.getmtime(REQUIREMENTS)
+    if stale:
+        say("Installing Python packages (this can take a minute)...")
+        run([VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
+        if run([VENV_PYTHON, "-m", "pip", "install", "--quiet", "-r", REQUIREMENTS]) != 0:
+            hint = ("On Windows, PyAudio needs a Python version that has a prebuilt wheel (3.11 or 3.12 are safest)."
+                    if IS_WIN else "On macOS, run: brew install portaudio   and then try again.")
+            sys.exit(f"Installing the packages failed. {hint}")
+        open(STAMP, "w").close()
+
+
+# ---------- Node.js (needed only for the window) ----------
+def find_npm():
+    found = shutil.which("npm.cmd" if IS_WIN else "npm") or shutil.which("npm")
+    if found:
+        return found
+    candidates = ["/opt/homebrew/bin/npm", "/usr/local/bin/npm"]
+    if IS_WIN:  # where the Node.js installer puts it, even before a new terminal has it on PATH
+        candidates = [os.path.join(os.environ.get(var, ""), *rest) for var, rest in (
+            ("ProgramFiles", ("nodejs", "npm.cmd")), ("ProgramFiles(x86)", ("nodejs", "npm.cmd")),
+            ("LOCALAPPDATA", ("Programs", "nodejs", "npm.cmd")))]
+    return next((c for c in candidates if c and os.path.exists(c)), None)
+
+
+def offer_node_install() -> None:
+    """Windows 10/11 ships with winget, which can install Node.js in one step."""
+    if not (IS_WIN and shutil.which("winget")):
+        return
+    say("Jarvis's window needs Node.js, which isn't installed on this PC.")
+    answer = input("[Jarvis] Install it now? (about 1 minute)  [Y/n] ").strip().lower()
+    if answer in ("", "y", "yes"):
+        run(["winget", "install", "-e", "--id", "OpenJS.NodeJS.LTS",
+             "--accept-source-agreements", "--accept-package-agreements"])
+
+
+def electron_installed() -> bool:
+    return os.path.exists(ELECTRON_OK)
+
+
+def electron_cache_dirs() -> list:
+    """Every place a (possibly corrupt) downloaded electron-*.zip could be sitting. ELECTRON_CACHE below is meant
+    to redirect @electron/get to one plain-path folder, but isn't always honored — seen in the wild, verbose
+    @electron/get output literally says "Checking the cache (undefined)" and still reports a "Cache hit", meaning
+    it reused its own OS-default cache location regardless of the env var. That default follows the env-paths
+    package electron tooling uses everywhere: %LOCALAPPDATA%\\electron\\Cache on Windows, ~/Library/Caches/electron
+    on macOS, $XDG_CACHE_HOME/electron (or ~/.cache/electron) on Linux. Clearing every one of these, not just the
+    override, is what actually guarantees a fresh download."""
+    dirs = [os.path.join(ROOT, ".electron-cache")]
+    if IS_WIN:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            dirs.append(os.path.join(local, "electron", "Cache"))
+    elif sys.platform == "darwin":
+        dirs.append(os.path.expanduser("~/Library/Caches/electron"))
+    else:
+        dirs.append(os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "electron"))
+    return dirs
+
+
+def plain_temp_env() -> dict:
+    """Windows, a user name with non-English letters: Windows' own temp folder (C:\\Users\\<name>\\AppData\\Local\\Temp)
+    has those letters too, and Electron's installer downloads and unpacks through it, whatever folder Jarvis is in.
+    Gives the installer a temp folder with a plain path, inside Jarvis's own folder."""
+    if not IS_WIN:
+        return {}
+    temp = os.environ.get("TEMP") or os.environ.get("TMP") or ""
+    if temp and is_plain_path(temp):
+        return {}
+    plain = os.path.join(ROOT, ".tmp")
+    os.makedirs(plain, exist_ok=True)
+    return {"TEMP": plain, "TMP": plain}
+
+
+def clear_electron_caches() -> None:
+    for d in electron_cache_dirs():
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def install_electron(npm: str) -> bool:
+    """npm can report success while Electron's own program file failed to download. Check, and retry with details.
+
+    A failed download can leave a corrupt/partial zip in one of electron_cache_dirs() — electron's own installer
+    then finds that file already there on the *next* run.py too (not just this retry loop) and reuses it without
+    re-downloading, failing the exact same silent way every time: "postinstall" completes with no download output
+    at all and no path.txt ever appears. Clearing every one of those caches before every attempt here, including
+    the first, is what actually fixes it — removing node_modules/electron alone (the old retry) just deletes the
+    *symptom*, and clearing only the ELECTRON_CACHE override misses the OS-default location it silently falls
+    back to."""
+    cache_dir = os.path.join(ROOT, ".electron-cache")
+    base = {**os.environ, "PATH": os.path.dirname(npm) + os.pathsep + os.environ.get("PATH", ""),
+            "ELECTRON_CACHE": cache_dir,  # a cache folder with a plain path — honored some of the time, not always
+            **plain_temp_env()}
+    say("Installing the window (Electron), first run only. This downloads about 100 MB...")
+    clear_electron_caches()
+    run([npm, "install", "--no-audit", "--no-fund", "--foreground-scripts"], env=base)
+    if electron_installed():
+        return True
+    attempts = [("again, with details", base),
+                ("through a mirror (in case GitHub is blocked here)",
+                 {**base, "ELECTRON_MIRROR": "https://npmmirror.com/mirrors/electron/"})]
+    for label, env in attempts:
+        say(f"The window didn't finish installing. Trying {label}...")
+        shutil.rmtree(os.path.join(ROOT, "node_modules", "electron"), ignore_errors=True)
+        clear_electron_caches()
+        result = subprocess.run([npm, "install", "electron", "--no-audit", "--no-fund", "--foreground-scripts"],
+                                cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if electron_installed():
+            return True
+        tail = "\n".join((result.stdout + "\n" + result.stderr).strip().splitlines()[-12:])
+        say("What npm said:\n" + (tail or "(nothing: it reported no error, yet Electron's program isn't there)"))
+    # Last resort: seen on a real machine where every attempt above genuinely downloaded a good zip (each one
+    # logged "Cache hit"/"Cache miss" then a real download, never a network failure) — node install.js's own
+    # extraction of it just silently failed every time, no error, nothing in node_modules/electron/dist at all,
+    # while the exact same zip extracted perfectly with Windows' own Expand-Archive. Finish the job ourselves
+    # with Python's zipfile, which doesn't go through whatever's failing in node's own extractor.
+    version = electron_package_version()
+    if version:
+        zip_path = find_cached_electron_zip(version)
+        if zip_path:
+            say("The download worked but Node's own extraction step failed silently — finishing it directly...")
+            if manually_extract_electron(zip_path):
+                return True
+    return False
+
+
+def electron_package_version() -> str:
+    """npm always unpacks electron's own package.json from its npm tarball even when the *separate* postinstall
+    step (downloading and extracting the real Electron binary from GitHub) fails — that's what's actually broken
+    above, not this — so the resolved version is reliably readable here regardless."""
+    try:
+        with open(os.path.join(ROOT, "node_modules", "electron", "package.json"), encoding="utf-8") as f:
+            return json.load(f).get("version", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def electron_platform_arch() -> str:
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x64" if machine in ("x86_64", "amd64", "x64") else machine
+    plat = "win32" if IS_WIN else "darwin" if sys.platform == "darwin" else "linux"
+    return f"{plat}-{arch}"
+
+
+def find_cached_electron_zip(version: str) -> str:
+    """Searches every electron_cache_dirs() location for an already-downloaded electron-v<version>-<platform>.zip
+    — see manually_extract_electron for why a perfectly good cached zip can still need finding by hand."""
+    name = f"electron-v{version}-{electron_platform_arch()}.zip"
+    for cache_dir in electron_cache_dirs():
+        if not os.path.isdir(cache_dir):
+            continue
+        for found_root, _dirs, files in os.walk(cache_dir):
+            if name in files:
+                return os.path.join(found_root, name)
+    return ""
+
+
+def manually_extract_electron(zip_path: str) -> bool:
+    """Unzips a known-good, already-downloaded Electron archive ourselves and writes the path.txt electron's own
+    `require('electron')` reads to find its binary — the same two things node install.js does, minus whatever in
+    its own extraction step was silently failing."""
+    dist_dir = os.path.join(ROOT, "node_modules", "electron", "dist")
+    try:
+        os.makedirs(dist_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(dist_dir)
+        exe_name = ("electron.exe" if IS_WIN else
+                    "Electron.app/Contents/MacOS/Electron" if sys.platform == "darwin" else "electron")
+        with open(os.path.join(ROOT, "node_modules", "electron", "path.txt"), "w", encoding="utf-8") as f:
+            f.write(exe_name)
+        return electron_installed()
+    except (OSError, zipfile.BadZipFile) as e:
+        say(f"Manual extraction also failed: {e}")
+        return False
+
+
+def ensure_window_packages():
+    """Make sure the window (Electron) is installed. Returns the npm to use, or None if there is no Node.js."""
+    npm = find_npm()
+    if not npm:
+        offer_node_install()
+        npm = find_npm()
+    if not npm:
+        return None
+    if not electron_installed() and not install_electron(npm):
+        say("The window could not be installed. Jarvis will still work by voice.")
+        say("Common causes: antivirus blocking the download, a firewall/VPN, or no internet. Run this again to retry.")
+    return npm
+
+
+# ---------- optional: a free AI that runs on this computer (Ollama), used when the online AI can't be reached ----------
+def find_ollama():
+    found = shutil.which("ollama")
+    if found:
+        return found
+    candidates = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama"]
+    if IS_WIN:
+        candidates = [os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe"),
+                      os.path.join(os.environ.get("ProgramFiles", ""), "Ollama", "ollama.exe")]
+    return next((c for c in candidates if c and os.path.exists(c)), None)
+
+
+def ollama_running() -> bool:
+    import urllib.request
+    try:
+        urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2).read()
+        return True
+    except Exception:
+        return False
+
+
+def setup_local_ai(model: str = "llama3.2") -> bool:
+    """Install Ollama if needed, make sure it is running, and download a small model (about 2 GB, once)."""
+    import time
+    say(f"Setting up a free AI that runs on this computer (Ollama, model {model}).")
+    ollama = find_ollama()
+    if not ollama:
+        if IS_WIN and shutil.which("winget"):
+            say("Installing Ollama...")
+            run(["winget", "install", "-e", "--id", "Ollama.Ollama", "--accept-source-agreements", "--accept-package-agreements"])
+        elif sys.platform == "darwin" and shutil.which("brew"):
+            say("Installing Ollama with Homebrew...")
+            run(["brew", "install", "ollama"])
+        ollama = find_ollama()
+    if not ollama:
+        say("Could not install Ollama automatically. Download it from https://ollama.com/download, install it, and run this again.")
+        return False
+    if not ollama_running():
+        say("Starting Ollama...")
+        kwargs = {"creationflags": 0x00000008 | 0x08000000} if IS_WIN else {}
+        subprocess.Popen([ollama, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+        for _ in range(30):
+            if ollama_running():
+                break
+            time.sleep(1)
+    if not ollama_running():
+        say("Ollama didn't start. Open the Ollama app once, then run this again.")
+        return False
+    say(f"Downloading the model {model} (about 2 GB, one time only)...")
+    if run([ollama, "pull", model]) != 0:
+        say("The model download failed. Check your internet connection and run this again.")
+        return False
+    say("Local AI is ready. Jarvis will use it automatically whenever the online AI can't be reached.")
+    return True
+
+
+def setup_local_images() -> bool:
+    """Install the (large, optional) packages for generating images on this computer's own GPU/CPU instead of a
+    cloud service — genuinely unlimited and free, but a multi-GB install; see requirements-local-images.txt."""
+    requirements = os.path.join(ROOT, "requirements-local-images.txt")
+    if not os.path.exists(requirements):
+        say("requirements-local-images.txt is missing; can't set up local image generation.")
+        return False
+    say("Installing local image generation (PyTorch + diffusers, a few GB, one time only)...")
+    if run([VENV_PYTHON, "-m", "pip", "install", "-r", requirements]) != 0:
+        say("Installing local image generation failed. Check your internet connection and run this again.")
+        return False
+    say("Local image generation is ready. Jarvis will use it automatically the next time you ask him to draw "
+        "something (the very first picture also downloads the model itself, a few GB more, one time only).")
+    return True
+
+
+def ensure_env_file() -> None:
+    env, example = os.path.join(ROOT, ".env"), os.path.join(ROOT, ".env.example")
+    if not os.path.exists(env) and os.path.exists(example):
+        shutil.copy(example, env)
+        say("Created a .env file for optional settings. No key is needed: Jarvis uses the AI on this computer. "
+            "For the faster online AI, add a free Groq key in Settings (or GROQ_API_KEY in .env).")
+
+
+def start_window(npm: str, env: dict) -> int:
+    """Start Jarvis's window, which starts and looks after the backend (the same way the installed app does)."""
+    env = {**env, "JARVIS_PYTHON": VENV_PYTHON,
+           "PATH": os.path.dirname(npm) + os.pathsep + env.get("PATH", "")}   # so npm finds node
+    env.pop("ELECTRON_RUN_AS_NODE", None)   # set in VS Code's terminal; it would start Electron as plain Node
+    process = subprocess.Popen([npm, "start"], cwd=ROOT, env=env)
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        try:
+            return process.wait(timeout=10)
+        except (KeyboardInterrupt, subprocess.TimeoutExpired):
+            process.terminate()
+            return 0
+
+
+def start_jarvis(env: dict) -> int:
+    """Run app.py and wait. Ctrl+C reaches Jarvis too, so just wait for it to finish instead of showing an error."""
+    process = subprocess.Popen([VENV_PYTHON, os.path.join(ROOT, "app.py")], cwd=ROOT, env=env)
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        try:
+            return process.wait(timeout=8)
+        except (KeyboardInterrupt, subprocess.TimeoutExpired):
+            process.terminate()
+            return 0
+
+
+if __name__ == "__main__":
+    use_utf8_console()
+    say(f"Jarvis launcher {VERSION}")
+    move_to_plain_folder()
+    ensure_env_file()
+    ensure_python_environment()
+    if "--local-ai" in sys.argv:
+        args = [a for a in sys.argv[sys.argv.index("--local-ai") + 1:] if not a.startswith("-")]
+        setup_local_ai(args[0] if args else "llama3.2")
+    if "--local-images" in sys.argv:
+        setup_local_images()
+    npm = ensure_window_packages()
+    child_env = {**os.environ, "JARVIS_SHOW_WINDOW": "1"}  # open the window straight away
+    if npm and electron_installed():
+        child_env["JARVIS_NPM"] = npm
+    else:
+        print("\n" + "=" * 70)
+        say("Jarvis's WINDOW cannot open" + (" (Node.js is not installed)" if not npm else " (its installer failed)")
+            + ". Jarvis itself still works by voice.")
+        say("Fix: " + ("install Node.js (LTS) from https://nodejs.org, then run this again." if not npm
+                       else "run this again; if it keeps failing, turn off antivirus for a minute while it downloads."))
+        print("=" * 70 + "\n", flush=True)
+        child_env.pop("JARVIS_SHOW_WINDOW")
+        child_env["JARVIS_NO_WINDOW"] = "1"  # don't keep retrying a window that can't start
+    say("Starting Jarvis. Say 'Hey Jarvis' to wake him up. Press Ctrl+C here to quit.")
+    if child_env.get("JARVIS_NPM"):
+        sys.exit(start_window(npm, child_env))   # the window starts the backend and restarts it when needed
+    sys.exit(start_jarvis(child_env))            # no window possible: voice only, as before
